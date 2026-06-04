@@ -1,0 +1,22 @@
+.markdown-body blockquote,
+.prose blockquote {
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-left: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 8px;
+  margin: 0 0 12px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.markdown-body blockquote h3,
+.prose blockquote h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.markdown-body blockquote code,
+.prose blockquote code {
+  border-radius: 999px;
+  padding: 3px 7px;
+}

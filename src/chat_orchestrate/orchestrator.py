@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+from .coordination import CoordinationManager
+from .models import AgentSpec, AgentTurn, OrchestrationRun, ProjectSpace
+from .swarm_client import SwarmClient
+
+
+AGENT_LIBRARY: dict[str, AgentSpec] = {
+    "coordinator": AgentSpec(
+        name="Coordinator",
+        role="planning lead",
+        instructions="Break the goal into clear workstreams, identify dependencies, and define success.",
+    ),
+    "researcher": AgentSpec(
+        name="Researcher",
+        role="context scout",
+        instructions="Find constraints, unknowns, risks, and useful references before implementation.",
+    ),
+    "engineer": AgentSpec(
+        name="Engineer",
+        role="implementation specialist",
+        instructions="Propose concrete implementation steps and code-level changes.",
+    ),
+    "reviewer": AgentSpec(
+        name="Reviewer",
+        role="quality reviewer",
+        instructions="Look for bugs, missing tests, unsafe assumptions, and deployment risks.",
+    ),
+    "documenter": AgentSpec(
+        name="Documenter",
+        role="documentation writer",
+        instructions="Convert the outcome into crisp notes, runbooks, and handoff-ready markdown.",
+    ),
+}
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        client: SwarmClient,
+        agent_names: list[str],
+        coordination: CoordinationManager | None = None,
+    ) -> None:
+        self.client = client
+        self.agents = [AGENT_LIBRARY[name] for name in agent_names if name in AGENT_LIBRARY]
+        self.coordination = coordination
+        if not self.agents:
+            self.agents = list(AGENT_LIBRARY.values())
+
+    async def run(self, goal: str, project: ProjectSpace) -> AsyncIterator[AgentTurn | OrchestrationRun]:
+        run = OrchestrationRun(goal=goal, project=project)
+        delegation_context = ""
+
+        if self.coordination is not None:
+            orchestrator_node = self.coordination.get_or_elect_orchestrator()
+            run.orchestrator_machine = orchestrator_node.machine_id
+            run.delegated_tasks = self.coordination.plan_delegation(run.run_id, project, goal)
+            delegation_context = self._delegation_context(run)
+
+        context = ""
+
+        for agent in self.agents:
+            agent_context = f"{delegation_context}\n\n{context}".strip()
+            output = await self.client.run_agent(agent, project, goal, agent_context)
+            turn = AgentTurn(
+                agent=agent.name,
+                role=agent.role,
+                content=output,
+                assigned_machine=self._assigned_machine_for_role(run, self._agent_key(agent)),
+                preferred_backend=self._preferred_backend_for_role(run, self._agent_key(agent)),
+            )
+            run.turns.append(turn)
+            context = self._append_context(context, turn)
+            yield turn
+
+        run.final = self._summarize(run)
+        yield run
+
+    def _append_context(self, context: str, turn: AgentTurn) -> str:
+        block = f"## {turn.agent} ({turn.role})\n{turn.content}"
+        return f"{context}\n\n{block}".strip()
+
+    def _summarize(self, run: OrchestrationRun) -> str:
+        handoffs = "\n".join(
+            f"- **{turn.agent}**"
+            f"{f' on `{turn.assigned_machine}`' if turn.assigned_machine else ''}: "
+            f"{f'`{turn.preferred_backend}` ' if turn.preferred_backend else ''}"
+            f"{self._first_line(turn.content)}"
+            for turn in run.turns
+        )
+        delegation = self._delegation_summary(run)
+        return (
+            f"## Run {run.run_id}\n\n"
+            f"**Project:** {run.project.name}\n"
+            f"**Orchestrator machine:** `{run.orchestrator_machine or 'local'}`\n"
+            f"**Goal:** {run.goal}\n\n"
+            f"{delegation}"
+            f"### Agent Handoffs\n{handoffs}"
+        )
+
+    def _first_line(self, content: str) -> str:
+        for line in content.splitlines():
+            clean = line.strip(" -")
+            if clean:
+                return clean
+        return "No output captured."
+
+    def _delegation_context(self, run: OrchestrationRun) -> str:
+        if not run.delegated_tasks:
+            return ""
+        assignments = "\n".join(
+            f"- {task.role}: {task.title} -> {task.assigned_machine}"
+            f" ({task.preferred_backend})"
+            for task in run.delegated_tasks
+        )
+        return (
+            "## Distributed Coordination\n"
+            f"Orchestrator machine: {run.orchestrator_machine}\n"
+            f"Delegated tasks:\n{assignments}"
+        )
+
+    def _delegation_summary(self, run: OrchestrationRun) -> str:
+        if not run.delegated_tasks:
+            return ""
+        assignments = "\n".join(
+            f"- `{task.assigned_machine}` via `{task.preferred_backend}`: "
+            f"**{task.role}** - {task.title}"
+            for task in run.delegated_tasks
+        )
+        return f"### Delegation Plan\n{assignments}\n\n"
+
+    def _assigned_machine_for_role(self, run: OrchestrationRun, role: str) -> str | None:
+        for task in run.delegated_tasks:
+            if task.role == role:
+                return task.assigned_machine
+        return None
+
+    def _preferred_backend_for_role(self, run: OrchestrationRun, role: str) -> str | None:
+        for task in run.delegated_tasks:
+            if task.role == role:
+                return task.preferred_backend
+        return None
+
+    def _agent_key(self, agent: AgentSpec) -> str:
+        return agent.name.lower()
