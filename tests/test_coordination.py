@@ -107,14 +107,21 @@ def test_worker_claims_and_completes_matching_backend_task(tmp_path: Path) -> No
 
 def test_command_override_accepts_quoted_paths(tmp_path: Path) -> None:
     executable = tmp_path / "codex.cmd"
-    executable.write_text("@echo off\n", encoding="utf-8")
+    executable.write_text("@echo off\r\necho codex help\r\nexit /B 0\r\n", encoding="utf-8")
 
     assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: f'"{executable}"'}) == str(executable)
 
 
+def test_command_override_rejects_config_directories(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+
+    assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: str(config_dir)}) is None
+
+
 def test_none_command_override_falls_back_to_auto_lookup(tmp_path: Path, monkeypatch) -> None:
     executable = tmp_path / "codex.cmd"
-    executable.write_text("@echo off\n", encoding="utf-8")
+    executable.write_text("@echo off\r\necho codex help\r\nexit /B 0\r\n", encoding="utf-8")
     monkeypatch.setenv("PATH", str(tmp_path))
 
     assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: "None"}).lower() == str(executable).lower()

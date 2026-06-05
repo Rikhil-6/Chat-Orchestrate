@@ -78,7 +78,7 @@ def run_task(
     if command is None:
         return (
             f"Backend `{task.preferred_backend}` is not executable on this machine.\n\n"
-            "Restart the app from a terminal where the matching CLI is on PATH, or select another Local Agent."
+            f"{backend_execution_hint(task.preferred_backend)}"
         )
 
     prompt = (
@@ -110,16 +110,26 @@ def command_for_backend(backend: str, command_overrides: dict[str, str] | None =
     override = _clean_command_value((command_overrides or {}).get(backend, ""))
     if override:
         if _looks_like_path(override):
-            return override if Path(override).exists() else None
-        return shutil.which(override)
+            candidate = _valid_path_command(Path(override), backend)
+            return str(candidate) if candidate else None
+        return _valid_command(shutil.which(override), backend)
     discovered = _discover_command(_default_command_names(backend))
     if discovered:
         return discovered
     if backend == CODEX_BACKEND:
-        return _safe_which("codex")
+        return _safe_which("codex", backend)
     if backend == CLAUDE_CODE_BACKEND:
-        return _safe_which("claude")
+        return _safe_which("claude", backend)
     return None
+
+
+def command_is_runnable(
+    backend: str,
+    command: str,
+    command_overrides: dict[str, str] | None = None,
+) -> bool:
+    overrides = {**(command_overrides or {}), backend: command}
+    return command_for_backend(backend, overrides) is not None
 
 
 def installed_app_for_backend(backend: str) -> str | None:
@@ -173,24 +183,53 @@ def _default_command_names(backend: str) -> list[str]:
 
 def _discover_command(names: list[str]) -> str | None:
     for name in names:
-        found = _safe_which(name)
-        if found and not _is_desktop_app_resource(found):
+        found = _safe_which(name, "")
+        if found:
             return found
 
     for directory in _candidate_command_dirs():
         for name in names:
-            path = directory / name
-            if path.exists() and not _is_desktop_app_resource(path):
-                return str(path)
+            candidate = _valid_path_command(directory / name, "")
+            if candidate:
+                return str(candidate)
 
     return None
 
 
-def _safe_which(name: str) -> str | None:
+def _safe_which(name: str, backend: str) -> str | None:
     found = shutil.which(name)
-    if not found or _is_desktop_app_resource(found):
+    return _valid_command(found, backend) if found else None
+
+
+def _valid_path_command(path: Path, backend: str) -> Path | None:
+    if not path.exists() or path.is_dir() or _is_desktop_app_resource(path):
         return None
-    return found
+    return path if _smoke_test_command(str(path), backend) else None
+
+
+def _valid_command(command: str | None, backend: str) -> str | None:
+    if not command or _is_desktop_app_resource(command):
+        return None
+    path = Path(command)
+    if _looks_like_path(command) and (not path.exists() or path.is_dir()):
+        return None
+    return command if _smoke_test_command(command, backend) else None
+
+
+def _smoke_test_command(command: str, backend: str) -> bool:
+    args = [command, "--help"]
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode == 0:
+        return True
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    if backend == CODEX_BACKEND:
+        return "codex" in output and "access is denied" not in output
+    if backend == CLAUDE_CODE_BACKEND:
+        return "claude" in output
+    return False
 
 
 def _candidate_command_dirs() -> list[Path]:
