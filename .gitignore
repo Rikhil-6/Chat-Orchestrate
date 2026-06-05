@@ -12,4 +12,5 @@ workspaces/
 workspace_state.json
 coordination_state.json
 runtime_config.json
+ui_state.json
 *.egg-info/

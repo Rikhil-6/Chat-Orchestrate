@@ -68,8 +68,9 @@ class LocalPreviewSwarmClient(SwarmClient):
 class LocalAgentCliClient(SwarmClient):
     """Routes chat turns through locally installed agent CLIs when available."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, preferred_backend: str = "auto") -> None:
         self.settings = settings
+        self.preferred_backend = preferred_backend
         self.backends = [
             backend
             for backend in detect_agent_backends(settings.configured_backends)
@@ -87,11 +88,16 @@ class LocalAgentCliClient(SwarmClient):
             f"User message:\n{goal}\n\n"
             f"Context from prior agents:\n{context or 'No prior context.'}"
         )
-        for backend in self.backends:
+        for backend in self._ordered_backends():
             output = await self._run_backend(backend, prompt)
             if output:
                 return f"`{backend}` local response\n\n{output}"
         return await self.preview.run_agent(agent, project, goal, context)
+
+    def _ordered_backends(self) -> list[str]:
+        if self.preferred_backend != "auto" and self.preferred_backend in self.backends:
+            return [self.preferred_backend, *[backend for backend in self.backends if backend != self.preferred_backend]]
+        return self.backends
 
     async def _run_backend(self, backend: str, prompt: str) -> str:
         if backend == CODEX_BACKEND:
@@ -118,9 +124,9 @@ class LocalAgentCliClient(SwarmClient):
         return output
 
 
-def build_swarm_client(settings: Settings) -> SwarmClient:
+def build_swarm_client(settings: Settings, preferred_backend: str = "auto") -> SwarmClient:
     if settings.use_open_swarm:
         return OpenSwarmClient(settings)
     if settings.use_local_agent_chat:
-        return LocalAgentCliClient(settings)
+        return LocalAgentCliClient(settings, preferred_backend)
     return LocalPreviewSwarmClient()

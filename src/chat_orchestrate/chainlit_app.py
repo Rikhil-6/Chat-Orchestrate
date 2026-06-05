@@ -12,6 +12,7 @@ from pathlib import Path
 
 import chainlit as cl
 import httpx
+from chainlit.input_widget import Select, Switch
 
 from chat_orchestrate.backends import backend_availability, detect_agent_backends
 from chat_orchestrate.config import get_settings
@@ -21,6 +22,13 @@ from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
 from chat_orchestrate.swarm_client import build_swarm_client
+from chat_orchestrate.ui_state import (
+    append_chat,
+    clear_chat_history,
+    load_chat_history,
+    load_preferences,
+    save_preferences,
+)
 
 settings = get_settings()
 agent_backends = detect_agent_backends(settings.configured_backends)
@@ -37,7 +45,6 @@ coordination = CoordinationManager(
     settings.coordination_http_url,
     settings.coordination_http_urls,
 )
-orchestrator = Orchestrator(build_swarm_client(settings), settings.default_agents, coordination)
 coordinator_process: subprocess.Popen | None = None
 hosted_connection: dict[str, str] = {}
 
@@ -77,6 +84,8 @@ async def on_chat_start() -> None:
         cl.user_session.set("project_space", default_space)
         active = "`default`"
 
+    await setup_chat_settings()
+    await restore_chat_history()
     await cl.Message(
         content=(
             f"Ready. Active project space: {active}\n\n"
@@ -89,7 +98,8 @@ async def on_chat_start() -> None:
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
             "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
-            "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`, `/end-session`."
+            "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`, "
+            "`/end-session`, `/clear-history`."
         )
     ).send()
     await update_cluster_roster()
@@ -107,6 +117,7 @@ async def on_message(message: cl.Message) -> None:
     if project is None:
         await cl.Message(content="Pick a project space first with `/use <name>`.").send()
         return
+    append_chat("user", "You", text)
 
     try:
         local_node = coordination.heartbeat()
@@ -124,15 +135,38 @@ async def on_message(message: cl.Message) -> None:
     )
     await status.send()
 
-    async for event in orchestrator.run(text, project):
+    selected_backend = cl.user_session.get("agent_backend") or "auto"
+    turn_orchestrator = Orchestrator(
+        build_swarm_client(settings, selected_backend),
+        settings.default_agents,
+        coordination,
+    )
+    async for event in turn_orchestrator.run(text, project):
         if isinstance(event, OrchestrationRun):
+            append_chat("assistant", "Run Summary", event.final)
             await cl.Message(content=event.final).send()
             continue
 
+        append_chat("assistant", event.agent, event.content)
         await cl.Message(
             author=event.agent,
             content=f"**{event.role}**\n\n{event.content}",
         ).send()
+
+
+@cl.on_settings_update
+async def on_settings_update(updated_settings: dict) -> None:
+    backend = str(updated_settings.get("agent_backend", "auto"))
+    restore_history = bool(updated_settings.get("restore_history", True))
+    cl.user_session.set("agent_backend", backend)
+    cl.user_session.set("restore_history", restore_history)
+    save_preferences(
+        {
+            "agent_backend": backend,
+            "restore_history": str(restore_history).lower(),
+        }
+    )
+    await update_cluster_roster()
 
 
 async def handle_command(text: str) -> None:
@@ -193,6 +227,9 @@ async def handle_command(text: str) -> None:
             await configure_file_connection()
         elif command == "/end-session":
             await end_session()
+        elif command == "/clear-history":
+            clear_chat_history()
+            await cl.Message(content="Local restored chat history cleared.").send()
         else:
             await cl.Message(content=command_help()).send()
     except ProjectSpaceError as exc:
@@ -214,6 +251,52 @@ async def show_spaces() -> None:
         for space in items
     ]
     await cl.Message(content="## Project Spaces\n\n" + "\n".join(lines)).send()
+
+
+async def setup_chat_settings() -> None:
+    preferences = load_preferences()
+    backend_values = ["auto", *agent_backends]
+    unique_backend_values = []
+    for backend in backend_values:
+        if backend not in unique_backend_values:
+            unique_backend_values.append(backend)
+    selected_backend = preferences.get("agent_backend", "auto")
+    if selected_backend not in unique_backend_values:
+        selected_backend = "auto"
+    restore_history = preferences.get("restore_history", "true").lower() != "false"
+    cl.user_session.set("agent_backend", selected_backend)
+    cl.user_session.set("restore_history", restore_history)
+    await cl.ChatSettings(
+        [
+            Select(
+                id="agent_backend",
+                label="Local Agent",
+                values=unique_backend_values,
+                initial=selected_backend,
+                tooltip="Choose which locally installed agent CLI should answer chat turns.",
+            ),
+            Switch(
+                id="restore_history",
+                label="Restore local chat on refresh",
+                initial=restore_history,
+                tooltip="Replay recent local chat records when the page reconnects.",
+            ),
+        ]
+    ).send()
+
+
+async def restore_chat_history() -> None:
+    if not cl.user_session.get("restore_history", True):
+        return
+    history = load_chat_history()
+    if not history:
+        return
+    await cl.Message(content="## Restored Local Chat\n\nRecent local messages from this machine:").send()
+    for record in history:
+        if record.role == "user":
+            await cl.Message(author=record.author, content=record.content).send()
+        else:
+            await cl.Message(author=record.author, content=record.content).send()
 
 
 async def show_machines() -> None:
@@ -518,6 +601,12 @@ async def end_session_action(_: cl.Action) -> None:
     await end_session()
 
 
+@cl.action_callback("clear_history")
+async def clear_history_action(_: cl.Action) -> None:
+    clear_chat_history()
+    await cl.Message(content="Local restored chat history cleared.").send()
+
+
 def machine_actions() -> list[cl.Action]:
     return [
         cl.Action(
@@ -588,6 +677,13 @@ def machine_actions() -> list[cl.Action]:
             label="End Session",
             tooltip="Stop hosted coordinator and wipe saved coordinator URL/token.",
             icon="log-out",
+            payload={},
+        ),
+        cl.Action(
+            name="clear_history",
+            label="Clear History",
+            tooltip="Clear the locally restored chat records for this machine.",
+            icon="trash-2",
             payload={},
         ),
     ]
@@ -672,15 +768,42 @@ def cluster_roster_actions() -> list[cl.Action]:
             icon="plug",
             payload={},
         ),
+        cl.Action(
+            name="show_backends",
+            label="Agents",
+            tooltip="Show local agent backend availability.",
+            icon="cpu",
+            payload={},
+        ),
+        cl.Action(
+            name="clear_history",
+            label="Clear History",
+            tooltip="Clear locally restored chat records.",
+            icon="trash-2",
+            payload={},
+        ),
     ]
 
 
 def local_chat_backend_label() -> str:
+    selected_backend = selected_chat_backend()
+    if selected_backend != "auto":
+        return selected_backend
     available = [item.name for item in backend_availability(agent_backends) if item.available]
     for backend in available:
         if backend != "simulated":
             return backend
     return "simulated"
+
+
+def selected_chat_backend() -> str:
+    try:
+        selected = cl.user_session.get("agent_backend")
+    except Exception:
+        selected = None
+    if selected:
+        return str(selected)
+    return load_preferences().get("agent_backend", "auto")
 
 
 def _format_machine_card(machine, orchestrator_id: str) -> str:
@@ -722,7 +845,8 @@ def command_help() -> str:
         "- `/connect-coordinator`\n"
         "- `/connect-http`\n"
         "- `/connect-file`\n"
-        "- `/end-session`"
+        "- `/end-session`\n"
+        "- `/clear-history`"
     )
 
 
