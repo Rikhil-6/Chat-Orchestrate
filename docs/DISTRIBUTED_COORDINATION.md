@@ -28,7 +28,7 @@ Distributed coordination lets multiple app instances share one coordination stat
 
 The Chainlit app also renders a **Machine Status** panel on startup. Use its buttons to refresh machine state, claim or release orchestrator status, inspect recent delegated tasks, and open the connection guide without typing commands.
 
-Use `/host-coordinator` or the **Host Coordinator** button on one running machine to start the shared HTTP coordinator from the UI. It asks for cluster ID, token, port, machine ID, and backend list, then shows the URLs other machines should use.
+Use `/host-coordinator` or the **Host Coordinator** button on one running machine to start the shared HTTP coordinator from the UI. It generates a token, uses the configured cluster/port defaults, and shows the URLs other machines should use.
 
 Use `/connect-coordinator` or the **Connect to Coordinator** button to save coordinator URL, fallback URLs, cluster ID, token, machine ID, backend list, and optional auto-host fallback from the UI. The app writes these values to ignored local `runtime_config.json`. Restart the UI or worker after saving so startup settings are rebuilt.
 

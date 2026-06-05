@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import secrets
 import socket
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import chainlit as cl
+import httpx
 
 from chat_orchestrate.backends import backend_availability, detect_agent_backends
 from chat_orchestrate.config import get_settings
@@ -36,6 +38,7 @@ coordination = CoordinationManager(
 )
 orchestrator = Orchestrator(build_swarm_client(settings), settings.default_agents, coordination)
 coordinator_process: subprocess.Popen | None = None
+hosted_connection: dict[str, str] = {}
 
 
 def stop_hosted_coordinator() -> None:
@@ -242,6 +245,12 @@ async def show_connection() -> None:
 
 
 async def configure_http_connection() -> None:
+    await cl.Message(
+        content=(
+            "Connect this machine to a hosted coordinator. Paste the coordinator URL first; "
+            "you will be asked for the cluster ID and token shown by the host."
+        )
+    ).send()
     coordinator_urls_text = await ask_text(
         "Coordinator URL or URLs. Use one URL, or comma-separate fallback URLs.",
         settings.coordination_http_urls or settings.coordination_http_url,
@@ -287,36 +296,23 @@ async def configure_http_connection() -> None:
 
 
 async def host_coordinator() -> None:
-    global coordinator_process
+    global coordinator_process, hosted_connection
     if coordinator_process and coordinator_process.poll() is None:
-        await cl.Message(content=hosted_coordinator_message(settings.cluster_id, settings.coordinator_port)).send()
+        cluster_id = hosted_connection.get("cluster_id", settings.cluster_id)
+        token = hosted_connection.get("token", settings.coordination_token)
+        port = int(hosted_connection.get("port", str(settings.coordinator_port)))
+        await cl.Message(
+            content=hosted_coordinator_message(cluster_id, token, port)
+        ).send()
         return
 
+    await cl.Message(content="Starting a coordinator on this machine...").send()
     default_cluster = settings.cluster_id if settings.cluster_id != "local" else "friends-project"
-    cluster_id = await ask_text("Cluster ID for the shared coordinator.", default_cluster)
-    if cluster_id is None:
-        return
-    token = await ask_text("Shared coordination token.", settings.coordination_token)
-    if token is None:
-        return
-    if not token:
-        await cl.Message(content="A shared token is required before hosting a coordinator.").send()
-        return
-    raw_port = await ask_text("Coordinator port.", str(settings.coordinator_port))
-    if raw_port is None:
-        return
-    try:
-        port = int(raw_port)
-    except ValueError:
-        await cl.Message(content=f"`{raw_port}` is not a valid port.").send()
-        return
-
-    machine_id = await ask_text("This machine ID.", settings.machine_id or socket.gethostname().lower())
-    if machine_id is None:
-        return
-    backends = await ask_text("Agent backends for this machine.", ",".join(agent_backends))
-    if backends is None:
-        return
+    cluster_id = default_cluster
+    token = settings.coordination_token or secrets.token_urlsafe(24)
+    port = settings.coordinator_port
+    machine_id = settings.machine_id or socket.gethostname().lower()
+    backends = ",".join(agent_backends)
 
     if not await start_hosted_coordinator(cluster_id, token, port):
         await cl.Message(
@@ -344,7 +340,8 @@ async def host_coordinator() -> None:
             "AGENT_BACKENDS": backends,
         }
     )
-    await cl.Message(content=hosted_coordinator_message(cluster_id, port)).send()
+    hosted_connection = {"cluster_id": cluster_id, "token": token, "port": str(port)}
+    await cl.Message(content=hosted_coordinator_message(cluster_id, token, port)).send()
 
 
 async def configure_file_connection() -> None:
@@ -622,7 +619,8 @@ def connection_cards() -> str:
         "> If both are using local file mode, each laptop is writing its own state file. Same Wi-Fi "
         "does not share that file automatically.\n\n"
         "> ### Same Wi-Fi Option\n"
-        "> Click **Host Coordinator** on one machine, or run:\n\n"
+        "> Click **Host Coordinator** on one machine. It will generate a token and show a "
+        "connection pack for the others. Manual equivalent:\n\n"
         "```powershell\n"
         '.\\scripts\\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 '
         '-ClusterId friends-project -Token "share-this-out-of-band"\n'
@@ -671,14 +669,22 @@ def hosted_state_path(cluster_id: str) -> Path:
     return Path(".tmp") / f"hosted-coordinator-{safe or 'cluster'}.json"
 
 
-def hosted_coordinator_message(cluster_id: str, port: int) -> str:
+def hosted_coordinator_message(cluster_id: str, token: str, port: int) -> str:
     urls = local_coordinator_urls(port)
     url_lines = "\n".join(f"- `{url}`" for url in urls)
+    primary_url = urls[0]
     return (
         "## Coordinator Hosted From This Machine\n\n"
-        f"Cluster: `{cluster_id}`\n\n"
+        f"Cluster: `{cluster_id}`  \n"
+        f"Token: `{token}`\n\n"
         "Other machines should use one of these coordinator URLs:\n\n"
         f"{url_lines}\n\n"
+        "Connection pack:\n\n"
+        "```text\n"
+        f"Coordinator URL: {primary_url}\n"
+        f"Cluster ID: {cluster_id}\n"
+        f"Token: {token}\n"
+        "```\n\n"
         "On each other app instance, click **Connect to Coordinator** or run `/connect-coordinator`, "
         "paste one of the URLs, then use the same cluster ID and token.\n\n"
         f"This machine's local runtime config was saved to `{RUNTIME_CONFIG_PATH}`. Restart this UI "
@@ -749,8 +755,26 @@ async def start_hosted_coordinator(cluster_id: str, token: str, port: int) -> bo
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    await asyncio.sleep(1)
-    return coordinator_process.poll() is None
+    if not await wait_for_coordinator(port, cluster_id):
+        if coordinator_process.poll() is None:
+            coordinator_process.terminate()
+        return False
+    return True
+
+
+async def wait_for_coordinator(port: int, cluster_id: str, timeout_seconds: float = 8.0) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    url = f"http://127.0.0.1:{port}/health"
+    while asyncio.get_running_loop().time() < deadline:
+        if coordinator_process and coordinator_process.poll() is not None:
+            return False
+        try:
+            response = await asyncio.to_thread(httpx.get, url, timeout=1.5)
+            if response.status_code == 200 and response.json().get("cluster_id") == cluster_id:
+                return True
+        except (httpx.HTTPError, ValueError):
+            await asyncio.sleep(0.3)
+    return False
 
 
 def parse_urls(text: str) -> list[str]:
