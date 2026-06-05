@@ -68,6 +68,7 @@ In chat, use commands like:
 /machines
 /claim-orchestrator
 /tasks
+/connect
 ```
 
 After selecting a project space, normal messages are treated as orchestration goals.
@@ -107,7 +108,7 @@ COORDINATION_TOKEN=share-this-out-of-band
 
 The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`.
 
-Chainlit also shows a **Machine Status** panel on startup with native buttons to refresh status, claim/release orchestrator status, and inspect recent delegated tasks.
+Chainlit also shows a **Machine Status** panel on startup with native buttons to refresh status, claim/release orchestrator status, inspect recent delegated tasks, and open a connection guide. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 
 ## Worker Launch
 

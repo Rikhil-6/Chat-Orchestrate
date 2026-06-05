@@ -19,9 +19,10 @@ Distributed coordination lets multiple app instances share one coordination stat
 /tasks
 /backends
 /workspace-modes
+/connect
 ```
 
-The Chainlit app also renders a **Machine Status** panel on startup. Use its buttons to refresh machine state, claim or release orchestrator status, and inspect recent delegated tasks without typing commands.
+The Chainlit app also renders a **Machine Status** panel on startup. Use its buttons to refresh machine state, claim or release orchestrator status, inspect recent delegated tasks, and open the connection guide without typing commands.
 
 ## Election
 
@@ -96,6 +97,56 @@ AGENT_BACKENDS=codex,claude-code,simulated
 The coordinator requires a bearer token when `COORDINATION_TOKEN` is set. Keep the token out of git and share it out of band.
 
 For production-grade coordination, replace the JSON persistence layer behind the coordinator with Redis, Postgres, or another store that supports locks and atomic updates.
+
+## Same Wi-Fi Checklist
+
+If two machines are on the same Wi-Fi but each app shows only `Online 1`, they are not sharing coordination state yet.
+
+1. Pick one machine to host the coordinator.
+2. On that host, run the coordinator with `--host 0.0.0.0`.
+3. Find the host machine's LAN IP address.
+4. On every UI and worker, set `COORDINATION_BACKEND=http`.
+5. Set `COORDINATION_HTTP_URL=http://<host-lan-ip>:8765`.
+6. Use the same `CLUSTER_ID` and `COORDINATION_TOKEN` on every machine.
+7. Restart the UI or worker on each machine and open `/machines`.
+
+Windows host:
+
+```powershell
+.\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"
+```
+
+Windows joiner `.env`:
+
+```env
+COORDINATION_BACKEND=http
+COORDINATION_HTTP_URL=http://192.168.1.25:8765
+CLUSTER_ID=friends-project
+COORDINATION_TOKEN=share-this-out-of-band
+MACHINE_ID=laptop-b
+AGENT_BACKENDS=codex
+```
+
+If it still shows one machine, check that the coordinator host firewall allows inbound TCP on the coordinator port and that both machines can open `http://<host-lan-ip>:8765/health`.
+
+## Different Networks Checklist
+
+When one laptop is on mobile data and another is on Wi-Fi, LAN IPs usually cannot reach each other. Use a reachable private URL instead:
+
+- VPN mesh: Tailscale, ZeroTier, or a company VPN.
+- Tunnel: Cloudflare Tunnel, ngrok, or another HTTPS tunnel.
+- VPS: run the coordinator on a small server and restrict access.
+
+Every machine still uses the same env shape:
+
+```env
+COORDINATION_BACKEND=http
+COORDINATION_HTTP_URL=https://your-private-coordinator.example
+CLUSTER_ID=friends-project
+COORDINATION_TOKEN=share-this-out-of-band
+```
+
+The token is not discovery by itself. It gates access after a machine already knows the coordinator URL.
 
 ## Backend Mixes
 

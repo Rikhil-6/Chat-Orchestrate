@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from datetime import UTC, datetime
 
 import chainlit as cl
@@ -57,7 +58,7 @@ async def on_chat_start() -> None:
             "Commands: `/spaces`, `/use <name>`, `/create-space <name> <path>`, "
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
-            "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`."
+            "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, `/connect`."
         )
     ).send()
     await show_machines()
@@ -147,6 +148,8 @@ async def handle_command(text: str) -> None:
             await show_tasks()
         elif command == "/backends":
             await show_backends()
+        elif command == "/connect":
+            await show_connection()
         else:
             await cl.Message(content=command_help()).send()
     except ProjectSpaceError as exc:
@@ -199,6 +202,10 @@ async def show_backends() -> None:
     await cl.Message(content=backend_status_cards(), actions=machine_actions()).send()
 
 
+async def show_connection() -> None:
+    await cl.Message(content=connection_cards(), actions=machine_actions()).send()
+
+
 async def show_workspace_modes() -> None:
     await cl.Message(
         content=(
@@ -246,6 +253,11 @@ async def show_backends_action(_: cl.Action) -> None:
     await show_backends()
 
 
+@cl.action_callback("show_connection")
+async def show_connection_action(_: cl.Action) -> None:
+    await show_connection()
+
+
 def machine_actions() -> list[cl.Action]:
     return [
         cl.Action(
@@ -281,6 +293,13 @@ def machine_actions() -> list[cl.Action]:
             label="Backends",
             tooltip="Show local agent backend availability.",
             icon="cpu",
+            payload={},
+        ),
+        cl.Action(
+            name="show_connection",
+            label="Connection",
+            tooltip="Show how this machine can join or host a shared cluster.",
+            icon="network",
             payload={},
         ),
     ]
@@ -332,7 +351,8 @@ def command_help() -> str:
         "- `/claim-orchestrator`\n"
         "- `/release-orchestrator`\n"
         "- `/tasks`\n"
-        "- `/backends`"
+        "- `/backends`\n"
+        "- `/connect`"
     )
 
 
@@ -344,3 +364,67 @@ def backend_status_cards() -> str:
         command = f" `{item.command}`" if item.command else ""
         lines.append(f"> ### {item.name}\n> `{state}`{command}\n")
     return "## Agent Backends\n\n" + "\n".join(lines)
+
+
+def connection_cards() -> str:
+    backend = settings.coordination_backend.lower().strip() or "file"
+    token_state = "set" if settings.coordination_token else "not set"
+    if backend == "http":
+        target = settings.coordination_http_url or "not configured"
+        return (
+            "## Cluster Connection\n\n"
+            "> ### Current Mode\n"
+            f"> Backend: `{backend}`  \n"
+            f"> Coordinator URL: `{target}`  \n"
+            f"> Cluster: `{settings.cluster_id}`  \n"
+            f"> Token: `{token_state}`\n\n"
+            "> ### What This Means\n"
+            "> This machine is using a shared HTTP coordinator. Any other machine with the same "
+            "`COORDINATION_HTTP_URL`, `CLUSTER_ID`, and `COORDINATION_TOKEN` should appear in "
+            "`/machines` after it starts.\n"
+        )
+
+    lan_urls = " ".join(f"`http://{address}:8765`" for address in local_lan_addresses())
+    if not lan_urls:
+        lan_urls = "`http://<this-machine-lan-ip>:8765`"
+    return (
+        "## Cluster Connection\n\n"
+        "> ### Current Mode\n"
+        f"> Backend: `{backend}`  \n"
+        f"> State file: `{settings.coordination_state_path}`  \n"
+        f"> Cluster: `{settings.cluster_id}`  \n"
+        f"> Token: `{token_state}`\n\n"
+        "> ### Why Two Laptops May Both Show Online 1\n"
+        "> If both are using local file mode, each laptop is writing its own state file. Same Wi-Fi "
+        "does not share that file automatically.\n\n"
+        "> ### Same Wi-Fi Option\n"
+        "> Pick one machine to host the coordinator:\n\n"
+        "```powershell\n"
+        '.\\scripts\\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 '
+        '-ClusterId friends-project -Token "share-this-out-of-band"\n'
+        "```\n\n"
+        f"> Other machines can try: {lan_urls}\n\n"
+        "> Set this on every UI or worker:\n\n"
+        "```env\n"
+        "COORDINATION_BACKEND=http\n"
+        "COORDINATION_HTTP_URL=http://<coordinator-lan-ip>:8765\n"
+        "CLUSTER_ID=friends-project\n"
+        "COORDINATION_TOKEN=share-this-out-of-band\n"
+        "```\n\n"
+        "> ### Different Networks Option\n"
+        "> Put the coordinator behind a private tunnel, VPN, or VPS URL, then use that HTTPS URL as "
+        "`COORDINATION_HTTP_URL` on every machine.\n"
+    )
+
+
+def local_lan_addresses() -> list[str]:
+    addresses = set()
+    hostname = socket.gethostname()
+    try:
+        for item in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
+            address = item[4][0]
+            if not address.startswith("127."):
+                addresses.add(address)
+    except socket.gaierror:
+        pass
+    return sorted(addresses)

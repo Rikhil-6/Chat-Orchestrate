@@ -25,6 +25,7 @@ def main() -> None:
     if args.state_path:
         os.environ["COORDINATION_STATE_PATH"] = args.state_path
 
+    get_settings.cache_clear()
     settings = get_settings()
     host = args.host or settings.coordinator_host
     port = args.port or settings.coordinator_port
