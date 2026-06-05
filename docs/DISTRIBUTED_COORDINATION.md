@@ -32,6 +32,8 @@ Use `/host-coordinator` or the **Host Coordinator** button on one running machin
 
 Use `/connect-coordinator` or the **Connect to Coordinator** button to paste the host's connection pack. It can also accept just a coordinator URL and will ask only for missing token details. The app writes these values to ignored local `runtime_config.json`, validates the token, and switches the current UI session to the coordinator.
 
+If the preferred coordinator port is busy, the host flow tries the next available ports and prints the actual port in the connection pack. The app does not change OS firewall rules by itself; if `/health` is unreachable from another machine, allow inbound TCP for that port or use a VPN/tunnel URL.
+
 ## Election
 
 On startup, each app sends a heartbeat. If no live orchestrator exists, the app elects the first online machine by machine ID. An explicit `/claim-orchestrator` overrides automatic election while that machine keeps heartbeating.

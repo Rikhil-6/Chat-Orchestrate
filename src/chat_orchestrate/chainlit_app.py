@@ -112,8 +112,8 @@ async def on_message(message: cl.Message) -> None:
         local_node = coordination.heartbeat()
         orchestrator_node = coordination.get_or_elect_orchestrator()
     except CoordinationError as exc:
-            await cl.Message(content=f"Coordination error: {exc}").send()
-            return
+        await cl.Message(content=f"Coordination error: {exc}").send()
+        return
     await update_cluster_roster()
     status = cl.Message(
         content=(
@@ -268,10 +268,11 @@ async def configure_http_connection() -> None:
         await cl.Message(content="Add at least one coordinator URL.").send()
         return
 
-    await cl.Message(content="Checking coordinator reachability...").send()
-    health = await fetch_coordinator_health(coordinator_urls)
+    status = cl.Message(content="Checking coordinator reachability...")
+    await status.send()
+    health = await fetch_coordinator_health(coordinator_urls, status_message=status)
     if health is None:
-        await cl.Message(content="Could not reach any coordinator URL. Check the host, port, and firewall.").send()
+        await cl.Message(content=coordinator_reachability_help(coordinator_urls)).send()
         return
 
     live_url, health_cluster_id = health
@@ -336,15 +337,24 @@ async def host_coordinator() -> None:
     default_cluster = settings.cluster_id if settings.cluster_id != "local" else "friends-project"
     cluster_id = default_cluster
     token = settings.coordination_token or secrets.token_urlsafe(24)
-    port = settings.coordinator_port
+    port = find_available_port(settings.coordinator_port)
+    if port != settings.coordinator_port:
+        await cl.Message(
+            content=(
+                f"Port `{settings.coordinator_port}` is already in use on this machine. "
+                f"Hosting on available port `{port}` instead."
+            )
+        ).send()
     machine_id = settings.machine_id or socket.gethostname().lower()
     backends = ",".join(agent_backends)
 
-    if not await start_hosted_coordinator(cluster_id, token, port):
+    status = cl.Message(content=f"Starting coordinator on port `{port}`...")
+    await status.send()
+    if not await start_hosted_coordinator(cluster_id, token, port, status_message=status):
         await cl.Message(
             content=(
-                "Coordinator did not stay running. The port may already be in use, or the host "
-                "firewall may be blocking it."
+                "Coordinator did not become reachable locally. The port may be blocked, unavailable, "
+                "or the coordinator process may have exited."
             )
         ).send()
         coordinator_process = None
@@ -792,6 +802,7 @@ def hosted_coordinator_message(cluster_id: str, token: str, port: int) -> str:
         "Connection pack:\n\n"
         "```text\n"
         f"Coordinator URL: {primary_url}\n"
+        f"Health Check: {primary_url}/health\n"
         f"Cluster ID: {cluster_id}\n"
         f"Token: {token}\n"
         "```\n\n"
@@ -841,7 +852,12 @@ async def try_auto_host_coordinator(exc: CoordinationError) -> bool:
     return True
 
 
-async def start_hosted_coordinator(cluster_id: str, token: str, port: int) -> bool:
+async def start_hosted_coordinator(
+    cluster_id: str,
+    token: str,
+    port: int,
+    status_message: cl.Message | None = None,
+) -> bool:
     global coordinator_process
     if coordinator_process and coordinator_process.poll() is None:
         return True
@@ -869,6 +885,9 @@ async def start_hosted_coordinator(cluster_id: str, token: str, port: int) -> bo
         if coordinator_process.poll() is None:
             coordinator_process.terminate()
         return False
+    if status_message:
+        status_message.content = f"Coordinator is running locally on port `{port}`."
+        await status_message.update()
     return True
 
 
@@ -921,14 +940,39 @@ def parse_connection_input(text: str) -> dict[str, object]:
     }
 
 
-async def fetch_coordinator_health(urls: list[str]) -> tuple[str, str] | None:
-    for url in urls:
-        try:
-            response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=2.5)
-            if response.status_code == 200:
-                return url, str(response.json().get("cluster_id", ""))
-        except (httpx.HTTPError, ValueError):
-            continue
+async def fetch_coordinator_health(
+    urls: list[str],
+    timeout_seconds: float = 25.0,
+    status_message: cl.Message | None = None,
+) -> tuple[str, str] | None:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    attempts = 0
+    last_error = ""
+    while asyncio.get_running_loop().time() < deadline:
+        for url in urls:
+            attempts += 1
+            try:
+                response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=3)
+                if response.status_code == 200:
+                    if status_message:
+                        status_message.content = f"Coordinator reachable at `{url}`."
+                        await status_message.update()
+                    return url, str(response.json().get("cluster_id", ""))
+                last_error = f"{url} returned HTTP {response.status_code}"
+            except httpx.HTTPError as exc:
+                last_error = f"{url}: {exc}"
+            except ValueError as exc:
+                last_error = f"{url}: invalid health response ({exc})"
+        if status_message:
+            remaining = max(0, int(deadline - asyncio.get_running_loop().time()))
+            status_message.content = (
+                "Still checking coordinator reachability...\n\n"
+                f"Attempts: `{attempts}`  \n"
+                f"Last result: `{last_error or 'waiting'}`  \n"
+                f"Time left: `{remaining}s`"
+            )
+            await status_message.update()
+        await asyncio.sleep(2)
     return None
 
 
@@ -950,6 +994,34 @@ async def validate_coordinator_token(url: str, cluster_id: str, token: str) -> s
 
 def prioritize_url(urls: list[str], live_url: str) -> list[str]:
     return [live_url, *[url for url in urls if url != live_url]]
+
+
+def find_available_port(preferred_port: int, attempts: int = 20) -> int:
+    for port in range(preferred_port, preferred_port + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError:
+                continue
+            return port
+    return preferred_port
+
+
+def coordinator_reachability_help(urls: list[str]) -> str:
+    url_lines = "\n".join(f"- `{url}/health`" for url in urls)
+    return (
+        "## Coordinator Not Reachable Yet\n\n"
+        "I retried for about 25 seconds and still could not reach the coordinator.\n\n"
+        "Try opening this from the connecting machine's browser:\n\n"
+        f"{url_lines}\n\n"
+        "If it does not load, check:\n\n"
+        "- The host machine is still running **Host Coordinator**.\n"
+        "- The URL uses the host's real Wi-Fi/LAN IP, not a virtual adapter IP.\n"
+        "- The host firewall allows inbound TCP on that port.\n"
+        "- Both machines are on the same network and Wi-Fi client isolation is off.\n\n"
+        "If port `8765` is busy, host again; the app can choose the next available port and show a new connection pack."
+    )
 
 
 def apply_http_connection(

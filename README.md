@@ -128,6 +128,8 @@ Use `/connect-coordinator` or the **Connect to Coordinator** button on the other
 
 When auto-host fallback is enabled, a machine that cannot reach any saved coordinator URL can start its own coordinator on `COORDINATOR_PORT`. Other machines need that fallback URL saved too, so add multiple coordinator URLs when you have more than one possible host.
 
+If `8765` is already busy, **Host Coordinator** picks the next available port and prints that port in the connection pack. If other machines still cannot open `/health`, allow inbound TCP for that port in the host OS firewall or use a VPN/tunnel URL.
+
 ## Worker Launch
 
 Run UI plus one local worker:
