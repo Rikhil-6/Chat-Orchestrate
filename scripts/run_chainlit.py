@@ -17,7 +17,11 @@ from chainlit.server import app
 from chainlit.utils import check_file
 from sniffio import current_async_library_cvar
 
-from terminal_control import shutdown_message, start_q_listener
+from terminal_control import (
+    install_clean_asyncio_exception_handler,
+    shutdown_message,
+    start_q_listener,
+)
 
 
 def main() -> None:
@@ -56,6 +60,7 @@ def main() -> None:
 
 async def serve(host: str, port: int) -> None:
     current_async_library_cvar.set("asyncio")
+    install_clean_asyncio_exception_handler()
     server_config = uvicorn.Config(
         app,
         host=host,

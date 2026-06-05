@@ -12,7 +12,11 @@ import uvicorn
 
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordinator_server import create_app
-from terminal_control import shutdown_message, start_q_listener
+from terminal_control import (
+    install_clean_asyncio_exception_handler,
+    shutdown_message,
+    start_q_listener,
+)
 
 
 def main() -> None:
@@ -42,6 +46,7 @@ def main() -> None:
 
 
 async def serve(settings, host: str, port: int) -> None:
+    install_clean_asyncio_exception_handler()
     config = uvicorn.Config(create_app(settings), host=host, port=port, log_level="info")
     server = uvicorn.Server(config)
     start_q_listener(lambda: setattr(server, "should_exit", True))

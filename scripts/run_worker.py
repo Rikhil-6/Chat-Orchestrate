@@ -10,7 +10,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from chat_orchestrate.worker import run_worker
-from terminal_control import shutdown_message, start_q_listener
+from terminal_control import (
+    install_clean_asyncio_exception_handler,
+    shutdown_message,
+    start_q_listener,
+)
 
 
 def main() -> None:
@@ -38,6 +42,7 @@ def main() -> None:
 
 
 async def run_until_stopped() -> None:
+    install_clean_asyncio_exception_handler()
     loop = asyncio.get_running_loop()
     worker_task = asyncio.create_task(run_worker())
 
