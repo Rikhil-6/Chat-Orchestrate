@@ -20,11 +20,14 @@ Distributed coordination lets multiple app instances share one coordination stat
 /backends
 /workspace-modes
 /connect
+/host-coordinator
 /connect-http
 /connect-file
 ```
 
 The Chainlit app also renders a **Machine Status** panel on startup. Use its buttons to refresh machine state, claim or release orchestrator status, inspect recent delegated tasks, and open the connection guide without typing commands.
+
+Use `/host-coordinator` or the **Host Coordinator** button on one running machine to start the shared HTTP coordinator from the UI. It asks for cluster ID, token, port, machine ID, and backend list, then shows the URLs other machines should use.
 
 Use `/connect-http` or the **Configure HTTP** button to save coordinator URL, cluster ID, token, machine ID, and backend list from the UI. The app writes these values to ignored local `runtime_config.json`. Restart the UI or worker after saving so startup settings are rebuilt.
 
@@ -108,15 +111,13 @@ For production-grade coordination, replace the JSON persistence layer behind the
 
 If two machines are on the same Wi-Fi but each app shows only `Online 1`, they are not sharing coordination state yet.
 
-1. Pick one machine to host the coordinator.
-2. On that host, run the coordinator with `--host 0.0.0.0`.
-3. Find the host machine's LAN IP address.
-4. On every UI and worker, set `COORDINATION_BACKEND=http`.
-5. Set `COORDINATION_HTTP_URL=http://<host-lan-ip>:8765`.
-6. Use the same `CLUSTER_ID` and `COORDINATION_TOKEN` on every machine.
-7. Restart the UI or worker on each machine and open `/machines`.
+1. Pick one machine and click **Host Coordinator**.
+2. Copy one of the LAN URLs it shows.
+3. On every other UI or worker, click **Configure HTTP** and paste that URL.
+4. Use the same `CLUSTER_ID` and `COORDINATION_TOKEN` on every machine.
+5. Restart the UI or worker on each machine and open `/machines`.
 
-Windows host:
+Manual Windows host:
 
 ```powershell
 .\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"

@@ -69,6 +69,7 @@ In chat, use commands like:
 /claim-orchestrator
 /tasks
 /connect
+/host-coordinator
 /connect-http
 /connect-file
 ```
@@ -112,7 +113,13 @@ The AI delegation pass records role-specific tasks against available machines an
 
 Chainlit also shows a **Machine Status** panel on startup with native buttons to refresh status, claim/release orchestrator status, inspect recent delegated tasks, and open a connection guide. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 
-Use `/connect-http` or the **Configure HTTP** button to save the coordinator URL, cluster ID, token, machine ID, and backend list from the UI. These values are saved to ignored local runtime config in `runtime_config.json`; restart the UI/worker after saving.
+Use **Host Coordinator** or `/host-coordinator` on one running machine to start the shared HTTP coordinator from the UI. It is the button version of:
+
+```powershell
+.\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"
+```
+
+Use `/connect-http` or the **Configure HTTP** button on the other machines to save the coordinator URL, cluster ID, token, machine ID, and backend list from the UI. These values are saved to ignored local runtime config in `runtime_config.json`; restart the UI/worker after saving.
 
 ## Worker Launch
 

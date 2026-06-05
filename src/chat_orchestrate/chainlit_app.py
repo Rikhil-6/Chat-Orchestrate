@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import atexit
+import asyncio
 import socket
+import subprocess
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import chainlit as cl
 
@@ -29,6 +34,17 @@ coordination = CoordinationManager(
     settings.coordination_http_url,
 )
 orchestrator = Orchestrator(build_swarm_client(settings), settings.default_agents, coordination)
+coordinator_process: subprocess.Popen | None = None
+
+
+def stop_hosted_coordinator() -> None:
+    global coordinator_process
+    if coordinator_process and coordinator_process.poll() is None:
+        coordinator_process.terminate()
+    coordinator_process = None
+
+
+atexit.register(stop_hosted_coordinator)
 
 
 @cl.on_chat_start
@@ -60,7 +76,7 @@ async def on_chat_start() -> None:
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
             "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
-            "`/connect`, `/connect-http`, `/connect-file`."
+            "`/connect`, `/host-coordinator`, `/connect-http`, `/connect-file`."
         )
     ).send()
     await show_machines()
@@ -152,6 +168,8 @@ async def handle_command(text: str) -> None:
             await show_backends()
         elif command == "/connect":
             await show_connection()
+        elif command == "/host-coordinator":
+            await host_coordinator()
         elif command == "/connect-http":
             await configure_http_connection()
         elif command == "/connect-file":
@@ -242,6 +260,82 @@ async def configure_http_connection() -> None:
         }
     )
     await cl.Message(content=restart_required_message("HTTP coordinator settings saved.")).send()
+
+
+async def host_coordinator() -> None:
+    global coordinator_process
+    if coordinator_process and coordinator_process.poll() is None:
+        await cl.Message(content=hosted_coordinator_message(settings.cluster_id, settings.coordinator_port)).send()
+        return
+
+    default_cluster = settings.cluster_id if settings.cluster_id != "local" else "friends-project"
+    cluster_id = await ask_text("Cluster ID for the shared coordinator.", default_cluster)
+    if cluster_id is None:
+        return
+    token = await ask_text("Shared coordination token.", settings.coordination_token)
+    if token is None:
+        return
+    raw_port = await ask_text("Coordinator port.", str(settings.coordinator_port))
+    if raw_port is None:
+        return
+    try:
+        port = int(raw_port)
+    except ValueError:
+        await cl.Message(content=f"`{raw_port}` is not a valid port.").send()
+        return
+
+    machine_id = await ask_text("This machine ID.", settings.machine_id or socket.gethostname().lower())
+    if machine_id is None:
+        return
+    backends = await ask_text("Agent backends for this machine.", ",".join(agent_backends))
+    if backends is None:
+        return
+
+    state_path = hosted_state_path(cluster_id)
+    coordinator_process = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_coordinator.py",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--cluster-id",
+            cluster_id,
+            "--token",
+            token,
+            "--state-path",
+            str(state_path),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    await asyncio.sleep(1)
+    if coordinator_process.poll() is not None:
+        await cl.Message(
+            content=(
+                "Coordinator did not stay running. The port may already be in use, or the host "
+                "firewall may be blocking it."
+            )
+        ).send()
+        coordinator_process = None
+        return
+
+    self_url = default_coordinator_url(port)
+    save_runtime_env(
+        {
+            "COORDINATION_BACKEND": "http",
+            "COORDINATION_HTTP_URL": self_url,
+            "CLUSTER_ID": cluster_id,
+            "COORDINATION_TOKEN": token,
+            "COORDINATOR_HOST": "0.0.0.0",
+            "COORDINATOR_PORT": str(port),
+            "MACHINE_ID": machine_id,
+            "AGENT_BACKENDS": backends,
+        }
+    )
+    await cl.Message(content=hosted_coordinator_message(cluster_id, port)).send()
 
 
 async def configure_file_connection() -> None:
@@ -335,6 +429,11 @@ async def show_connection_action(_: cl.Action) -> None:
     await show_connection()
 
 
+@cl.action_callback("host_coordinator")
+async def host_coordinator_action(_: cl.Action) -> None:
+    await host_coordinator()
+
+
 @cl.action_callback("configure_http")
 async def configure_http_action(_: cl.Action) -> None:
     await configure_http_connection()
@@ -387,6 +486,13 @@ def machine_actions() -> list[cl.Action]:
             label="Connection",
             tooltip="Show how this machine can join or host a shared cluster.",
             icon="network",
+            payload={},
+        ),
+        cl.Action(
+            name="host_coordinator",
+            label="Host Coordinator",
+            tooltip="Start the shared HTTP coordinator from this machine.",
+            icon="radio-tower",
             payload={},
         ),
         cl.Action(
@@ -454,6 +560,7 @@ def command_help() -> str:
         "- `/tasks`\n"
         "- `/backends`\n"
         "- `/connect`\n"
+        "- `/host-coordinator`\n"
         "- `/connect-http`\n"
         "- `/connect-file`"
     )
@@ -503,7 +610,7 @@ def connection_cards() -> str:
         "> If both are using local file mode, each laptop is writing its own state file. Same Wi-Fi "
         "does not share that file automatically.\n\n"
         "> ### Same Wi-Fi Option\n"
-        "> Pick one machine to host the coordinator:\n\n"
+        "> Click **Host Coordinator** on one machine, or run:\n\n"
         "```powershell\n"
         '.\\scripts\\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 '
         '-ClusterId friends-project -Token "share-this-out-of-band"\n'
@@ -533,6 +640,34 @@ def local_lan_addresses() -> list[str]:
     except socket.gaierror:
         pass
     return sorted(addresses)
+
+
+def default_coordinator_url(port: int) -> str:
+    addresses = local_lan_addresses()
+    host = addresses[0] if addresses else "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
+def hosted_state_path(cluster_id: str) -> Path:
+    safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in cluster_id)
+    return Path(".tmp") / f"hosted-coordinator-{safe or 'cluster'}.json"
+
+
+def hosted_coordinator_message(cluster_id: str, port: int) -> str:
+    urls = [f"http://{address}:{port}" for address in local_lan_addresses()]
+    if not urls:
+        urls = [f"http://127.0.0.1:{port}"]
+    url_lines = "\n".join(f"- `{url}`" for url in urls)
+    return (
+        "## Coordinator Hosted From This Machine\n\n"
+        f"Cluster: `{cluster_id}`\n\n"
+        "Other machines should use one of these coordinator URLs:\n\n"
+        f"{url_lines}\n\n"
+        "On each other app instance, click **Configure HTTP** or run `/connect-http`, paste one of "
+        "the URLs, then use the same cluster ID and token.\n\n"
+        f"This machine's local runtime config was saved to `{RUNTIME_CONFIG_PATH}`. Restart this UI "
+        "after hosting if you want it to join through the hosted coordinator too."
+    )
 
 
 def restart_required_message(title: str) -> str:
