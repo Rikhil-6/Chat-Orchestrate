@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import re
 import secrets
 import socket
 import subprocess
@@ -247,52 +248,73 @@ async def show_connection() -> None:
 async def configure_http_connection() -> None:
     await cl.Message(
         content=(
-            "Connect this machine to a hosted coordinator. Paste the coordinator URL first; "
-            "you will be asked for the cluster ID and token shown by the host."
+            "Connect this machine to a hosted coordinator. Paste the connection pack from the host, "
+            "or paste just the coordinator URL."
         )
     ).send()
-    coordinator_urls_text = await ask_text(
-        "Coordinator URL or URLs. Use one URL, or comma-separate fallback URLs.",
+    connection_text = await ask_text(
+        "Coordinator connection pack or URL.",
         settings.coordination_http_urls or settings.coordination_http_url,
     )
-    if coordinator_urls_text is None:
+    if connection_text is None:
         return
-    coordinator_urls = parse_urls(coordinator_urls_text)
+    parsed = parse_connection_input(connection_text)
+    coordinator_urls = parsed["urls"]
     if not coordinator_urls:
         await cl.Message(content="Add at least one coordinator URL.").send()
         return
-    cluster_id = await ask_text("Cluster ID.", settings.cluster_id)
-    if cluster_id is None:
+
+    await cl.Message(content="Checking coordinator reachability...").send()
+    health = await fetch_coordinator_health(coordinator_urls)
+    if health is None:
+        await cl.Message(content="Could not reach any coordinator URL. Check the host, port, and firewall.").send()
         return
-    token = await ask_text("Shared coordination token.", settings.coordination_token)
-    if token is None:
-        return
+
+    live_url, health_cluster_id = health
+    cluster_id = parsed["cluster_id"] or health_cluster_id or settings.cluster_id
+    token = parsed["token"] or settings.coordination_token
     if not token:
+        token = await ask_text("Shared token shown by the host.")
+    if token is None or not token:
         await cl.Message(content="A shared token is required before joining a coordinator.").send()
         return
-    machine_id = await ask_text("This machine ID.", settings.machine_id or socket.gethostname().lower())
-    if machine_id is None:
-        return
-    backends = await ask_text("Agent backends for this machine.", ",".join(agent_backends))
-    if backends is None:
-        return
-    auto_host = await ask_text("Allow this machine to auto-host if all coordinator URLs fail? yes/no", "no")
-    if auto_host is None:
+
+    validation_error = await validate_coordinator_token(live_url, cluster_id, token)
+    if validation_error:
+        await cl.Message(content=f"Coordinator token check failed: {validation_error}").send()
         return
 
     save_runtime_env(
         {
             "COORDINATION_BACKEND": "http",
-            "COORDINATION_HTTP_URL": coordinator_urls[0],
-            "COORDINATION_HTTP_URLS": ",".join(coordinator_urls),
+            "COORDINATION_HTTP_URL": live_url,
+            "COORDINATION_HTTP_URLS": ",".join(prioritize_url(coordinator_urls, live_url)),
             "CLUSTER_ID": cluster_id,
             "COORDINATION_TOKEN": token,
-            "COORDINATOR_AUTO_HOST": str(is_yes(auto_host)).lower(),
-            "MACHINE_ID": machine_id,
-            "AGENT_BACKENDS": backends,
+            "COORDINATOR_AUTO_HOST": str(settings.coordinator_auto_host).lower(),
+            "MACHINE_ID": settings.machine_id or socket.gethostname().lower(),
+            "AGENT_BACKENDS": ",".join(agent_backends),
         }
     )
-    await cl.Message(content=restart_required_message("Coordinator connection saved.")).send()
+    apply_http_connection(prioritize_url(coordinator_urls, live_url), cluster_id, token)
+    try:
+        node = coordination.heartbeat()
+        orchestrator_node = coordination.get_or_elect_orchestrator()
+    except CoordinationError as exc:
+        await cl.Message(content=f"Saved connection, but live heartbeat failed: {exc}").send()
+        return
+
+    await cl.Message(
+        content=(
+            "## Connected To Coordinator\n\n"
+            f"Coordinator URL: `{coordination.http_url}`  \n"
+            f"Cluster: `{cluster_id}`  \n"
+            f"Machine: `{node.machine_id}`  \n"
+            f"Orchestrator: `{orchestrator_node.machine_id}`\n\n"
+            f"Saved to `{RUNTIME_CONFIG_PATH}`. This UI session is using the coordinator now."
+        )
+    ).send()
+    await show_machines()
 
 
 async def host_coordinator() -> None:
@@ -341,6 +363,12 @@ async def host_coordinator() -> None:
         }
     )
     hosted_connection = {"cluster_id": cluster_id, "token": token, "port": str(port)}
+    apply_http_connection(candidate_urls, cluster_id, token, auto_host=True)
+    try:
+        coordination.heartbeat()
+        coordination.get_or_elect_orchestrator()
+    except CoordinationError:
+        pass
     await cl.Message(content=hosted_coordinator_message(cluster_id, token, port)).send()
 
 
@@ -687,8 +715,8 @@ def hosted_coordinator_message(cluster_id: str, token: str, port: int) -> str:
         "```\n\n"
         "On each other app instance, click **Connect to Coordinator** or run `/connect-coordinator`, "
         "paste one of the URLs, then use the same cluster ID and token.\n\n"
-        f"This machine's local runtime config was saved to `{RUNTIME_CONFIG_PATH}`. Restart this UI "
-        "after hosting if you want it to join through the hosted coordinator too."
+        f"This machine's local runtime config was saved to `{RUNTIME_CONFIG_PATH}`. "
+        "This UI session is now using the hosted coordinator."
     )
 
 
@@ -779,11 +807,88 @@ async def wait_for_coordinator(port: int, cluster_id: str, timeout_seconds: floa
 
 def parse_urls(text: str) -> list[str]:
     urls = []
-    for item in text.replace("\n", ",").split(","):
-        url = item.strip().rstrip("/")
+    url_matches = re.findall(r"https?://[^\s,`]+|(?:\d{1,3}\.){3}\d{1,3}:\d+", text)
+    raw_items = url_matches or text.replace("\n", ",").split(",")
+    for item in raw_items:
+        url = item.strip().strip("`").rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            url = f"http://{url}"
         if url and url not in urls:
             urls.append(url)
     return urls
+
+
+def parse_connection_input(text: str) -> dict[str, object]:
+    fields = {}
+    for line in text.splitlines():
+        separator = ":" if ":" in line else "=" if "=" in line else ""
+        if not separator:
+            continue
+        key, value = line.split(separator, 1)
+        normalized = key.strip().lower().replace("_", " ")
+        fields[normalized] = value.strip().strip("`")
+    return {
+        "urls": parse_urls(
+            fields.get("coordinator url", "")
+            or fields.get("coordination http url", "")
+            or fields.get("coordination http urls", "")
+            or text
+        ),
+        "cluster_id": fields.get("cluster id", "") or fields.get("cluster", ""),
+        "token": fields.get("token", "") or fields.get("coordination token", ""),
+    }
+
+
+async def fetch_coordinator_health(urls: list[str]) -> tuple[str, str] | None:
+    for url in urls:
+        try:
+            response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=2.5)
+            if response.status_code == 200:
+                return url, str(response.json().get("cluster_id", ""))
+        except (httpx.HTTPError, ValueError):
+            continue
+    return None
+
+
+async def validate_coordinator_token(url: str, cluster_id: str, token: str) -> str:
+    try:
+        response = await asyncio.to_thread(
+            httpx.get,
+            f"{url}/state",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"cluster_id": cluster_id},
+            timeout=4,
+        )
+    except httpx.HTTPError as exc:
+        return str(exc)
+    if response.status_code == 200:
+        return ""
+    return f"{response.status_code} {response.text}"
+
+
+def prioritize_url(urls: list[str], live_url: str) -> list[str]:
+    return [live_url, *[url for url in urls if url != live_url]]
+
+
+def apply_http_connection(
+    urls: list[str],
+    cluster_id: str,
+    token: str,
+    auto_host: bool | None = None,
+) -> None:
+    settings.coordination_backend = "http"
+    settings.coordination_http_url = urls[0]
+    settings.coordination_http_urls = ",".join(urls)
+    settings.cluster_id = cluster_id
+    settings.coordination_token = token
+    if auto_host is not None:
+        settings.coordinator_auto_host = auto_host
+    coordination.backend = "http"
+    coordination.http_urls = urls
+    coordination.http_url = urls[0]
+    coordination.cluster_id = cluster_id
+    coordination.coordination_token = token
+    coordination.token_hash = coordination._hash_token(token)
 
 
 def is_yes(text: str) -> bool:

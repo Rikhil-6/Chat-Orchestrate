@@ -120,7 +120,7 @@ Use **Host Coordinator** or `/host-coordinator` on one running machine to start 
 .\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"
 ```
 
-Use `/connect-coordinator` or the **Connect to Coordinator** button on the other machines to save coordinator URL, fallback URLs, cluster ID, token, machine ID, backend list, and optional auto-host fallback from the UI. These values are saved to ignored local runtime config in `runtime_config.json`; restart the UI/worker after saving.
+Use `/connect-coordinator` or the **Connect to Coordinator** button on the other machines to paste the host's connection pack. It can also accept just a coordinator URL and will ask only for missing token details. These values are saved to ignored local runtime config in `runtime_config.json`, and the current UI session switches over immediately.
 
 When auto-host fallback is enabled, a machine that cannot reach any saved coordinator URL can start its own coordinator on `COORDINATOR_PORT`. Other machines need that fallback URL saved too, so add multiple coordinator URLs when you have more than one possible host.
 

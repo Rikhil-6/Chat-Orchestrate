@@ -30,7 +30,7 @@ The Chainlit app also renders a **Machine Status** panel on startup. Use its but
 
 Use `/host-coordinator` or the **Host Coordinator** button on one running machine to start the shared HTTP coordinator from the UI. It generates a token, uses the configured cluster/port defaults, and shows the URLs other machines should use.
 
-Use `/connect-coordinator` or the **Connect to Coordinator** button to save coordinator URL, fallback URLs, cluster ID, token, machine ID, backend list, and optional auto-host fallback from the UI. The app writes these values to ignored local `runtime_config.json`. Restart the UI or worker after saving so startup settings are rebuilt.
+Use `/connect-coordinator` or the **Connect to Coordinator** button to paste the host's connection pack. It can also accept just a coordinator URL and will ask only for missing token details. The app writes these values to ignored local `runtime_config.json`, validates the token, and switches the current UI session to the coordinator.
 
 ## Election
 
