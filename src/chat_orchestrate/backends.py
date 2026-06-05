@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ class BackendAvailability:
     name: str
     available: bool
     command: str | None = None
+    installed_app: str | None = None
+    app_launch_id: str | None = None
 
 
 def detect_agent_backends(configured: list[str], command_overrides: dict[str, str] | None = None) -> list[str]:
@@ -50,6 +53,8 @@ def backend_availability(
             name=backend,
             available=_is_available(backend, command_overrides),
             command=command_for_backend(backend, command_overrides),
+            installed_app=installed_app_for_backend(backend),
+            app_launch_id=app_launch_id_for_backend(backend),
         )
         for backend in backends
     ]
@@ -111,10 +116,46 @@ def command_for_backend(backend: str, command_overrides: dict[str, str] | None =
     if discovered:
         return discovered
     if backend == CODEX_BACKEND:
-        return shutil.which("codex")
+        return _safe_which("codex")
     if backend == CLAUDE_CODE_BACKEND:
-        return shutil.which("claude")
+        return _safe_which("claude")
     return None
+
+
+def installed_app_for_backend(backend: str) -> str | None:
+    if backend == CODEX_BACKEND:
+        install = _windows_codex_install()
+        if install is not None:
+            return f"OpenAI Codex desktop app at {install}"
+    return None
+
+
+def app_launch_id_for_backend(backend: str) -> str | None:
+    if backend == CODEX_BACKEND and _windows_codex_install() is not None:
+        return "OpenAI.Codex_2p2nqsd0c76g0!App"
+    return None
+
+
+def launch_backend_app(backend: str) -> bool:
+    launch_id = app_launch_id_for_backend(backend)
+    if not launch_id:
+        return False
+    try:
+        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{launch_id}"])
+    except OSError:
+        return False
+    return True
+
+
+def backend_execution_hint(backend: str) -> str:
+    app = installed_app_for_backend(backend)
+    if backend == CODEX_BACKEND and app:
+        return (
+            "Codex desktop app is installed, but this Chainlit process still needs a callable headless "
+            "CLI/API to run it as an agent. Use Launch Codex App to sign in, then restart or expose a "
+            "working Codex CLI command."
+        )
+    return "Install the CLI or restart Chainlit from a terminal where the command is on PATH."
 
 
 def _clean_command_value(value: str | None) -> str:
@@ -132,17 +173,24 @@ def _default_command_names(backend: str) -> list[str]:
 
 def _discover_command(names: list[str]) -> str | None:
     for name in names:
-        found = shutil.which(name)
-        if found:
+        found = _safe_which(name)
+        if found and not _is_desktop_app_resource(found):
             return found
 
     for directory in _candidate_command_dirs():
         for name in names:
             path = directory / name
-            if path.exists():
+            if path.exists() and not _is_desktop_app_resource(path):
                 return str(path)
 
     return None
+
+
+def _safe_which(name: str) -> str | None:
+    found = shutil.which(name)
+    if not found or _is_desktop_app_resource(found):
+        return None
+    return found
 
 
 def _candidate_command_dirs() -> list[Path]:
@@ -161,13 +209,25 @@ def _candidate_command_dirs() -> list[Path]:
             ]
         )
 
-    program_files = os.environ.get("ProgramFiles")
-    if program_files:
-        windows_apps = Path(program_files) / "WindowsApps"
-        if windows_apps.exists():
-            candidates.extend(path / "app" / "resources" for path in windows_apps.glob("OpenAI.Codex_*"))
-
     return candidates
+
+
+def _windows_codex_install() -> Path | None:
+    if platform.system().lower() != "windows":
+        return None
+    program_files = os.environ.get("ProgramFiles")
+    if not program_files:
+        return None
+    windows_apps = Path(program_files) / "WindowsApps"
+    if not windows_apps.exists():
+        return None
+    installs = sorted(windows_apps.glob("OpenAI.Codex_*"), reverse=True)
+    return installs[0] if installs else None
+
+
+def _is_desktop_app_resource(path: str | Path) -> bool:
+    normalized = str(path).lower().replace("/", "\\")
+    return "\\windowsapps\\openai.codex_" in normalized and "\\app\\resources\\" in normalized
 
 
 def _looks_like_path(value: str) -> bool:

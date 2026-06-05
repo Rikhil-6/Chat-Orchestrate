@@ -120,6 +120,20 @@ def test_none_command_override_falls_back_to_auto_lookup(tmp_path: Path, monkeyp
     assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: "None"}).lower() == str(executable).lower()
 
 
+def test_windows_store_codex_resource_is_not_treated_as_cli(tmp_path: Path, monkeypatch) -> None:
+    resource_dir = tmp_path / "WindowsApps" / "OpenAI.Codex_1.0.0_x64__abc" / "app" / "resources"
+    resource_dir.mkdir(parents=True)
+    (resource_dir / "codex.cmd").write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(resource_dir))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "pf86"))
+
+    assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: "None"}) is None
+
+
 def test_coordination_token_mismatch_is_rejected(tmp_path: Path) -> None:
     state = tmp_path / "coordination.json"
     manager_a = CoordinationManager(

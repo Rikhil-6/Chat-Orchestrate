@@ -3,7 +3,14 @@ from __future__ import annotations
 import asyncio
 import httpx
 
-from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, SIMULATED_BACKEND, command_for_backend, detect_agent_backends
+from .backends import (
+    CLAUDE_CODE_BACKEND,
+    CODEX_BACKEND,
+    SIMULATED_BACKEND,
+    backend_execution_hint,
+    command_for_backend,
+    detect_agent_backends,
+)
 from .config import Settings
 from .models import AgentSpec, ProjectSpace
 
@@ -104,7 +111,7 @@ class LocalAgentCliClient(SwarmClient):
                 return (
                     f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
                     f"Tried command: `{self._configured_command_label(backend)}`\n\n"
-                    "Set the command/path in the sidebar, or restart Chainlit from a terminal where that command is on `PATH`."
+                    f"{backend_execution_hint(backend)}"
                 )
         return await self.preview.run_agent(agent, project, goal, context)
 

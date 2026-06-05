@@ -20,8 +20,10 @@ from chat_orchestrate.backends import (
     OPEN_SWARM_BACKEND,
     SIMULATED_BACKEND,
     backend_availability,
+    backend_execution_hint,
     command_for_backend,
     detect_agent_backends,
+    launch_backend_app,
     run_task,
 )
 from chat_orchestrate.config import get_settings
@@ -710,6 +712,19 @@ async def show_backends_action(_: cl.Action) -> None:
     await show_backends()
 
 
+@cl.action_callback("launch_codex_app")
+async def launch_codex_app_action(_: cl.Action) -> None:
+    if launch_backend_app(CODEX_BACKEND):
+        await cl.Message(
+            content=(
+                "Launched the Codex desktop app. Sign in or complete setup there, then return here and retry. "
+                "For headless agent execution, Chainlit still needs a callable Codex CLI/API."
+            )
+        ).send()
+    else:
+        await cl.Message(content="Could not find a launchable Codex desktop app on this machine.").send()
+
+
 @cl.action_callback("show_connection")
 async def show_connection_action(_: cl.Action) -> None:
     await show_connection()
@@ -776,6 +791,13 @@ def machine_actions() -> list[cl.Action]:
             label="Backends",
             tooltip="Show local agent backend availability.",
             icon="cpu",
+            payload={},
+        ),
+        cl.Action(
+            name="launch_codex_app",
+            label="Launch Codex App",
+            tooltip="Open the installed Codex desktop app for login/setup.",
+            icon="log-in",
             payload={},
         ),
         cl.Action(
@@ -910,6 +932,13 @@ def cluster_roster_actions() -> list[cl.Action]:
             payload={},
         ),
         cl.Action(
+            name="launch_codex_app",
+            label="Launch Codex",
+            tooltip="Open the installed Codex desktop app for login/setup.",
+            icon="log-in",
+            payload={},
+        ),
+        cl.Action(
             name="clear_history",
             label="Clear History",
             tooltip="Clear locally restored chat records.",
@@ -989,9 +1018,11 @@ def backend_status_cards() -> str:
     items = backend_availability(agent_backends, load_command_overrides())
     lines = []
     for item in items:
-        state = "available" if item.available else "configured"
+        state = "headless-ready" if item.available else "installed-app-only" if item.installed_app else "not-ready"
         command = f" `{item.command}`" if item.command else ""
-        lines.append(f"> ### {item.name}\n> `{state}`{command}\n")
+        app = f"\n> App: `{item.installed_app}`" if item.installed_app else ""
+        hint = "" if item.available else f"\n> {backend_execution_hint(item.name)}"
+        lines.append(f"> ### {item.name}\n> `{state}`{command}{app}{hint}\n")
     return "## Agent Backends\n\n" + "\n".join(lines)
 
 
