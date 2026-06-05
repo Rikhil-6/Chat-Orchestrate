@@ -32,10 +32,12 @@ class CoordinationManager:
         coordination_token: str = "",
         backend: str = "file",
         http_url: str = "",
+        http_urls: str = "",
     ) -> None:
         self.state_path = state_path.resolve()
         self.backend = backend.lower().strip() or "file"
-        self.http_url = http_url.rstrip("/")
+        self.http_urls = self._normalize_urls(http_url, http_urls)
+        self.http_url = self.http_urls[0] if self.http_urls else ""
         self.cluster_id = cluster_id.strip() or "local"
         self.coordination_token = coordination_token.strip()
         self.token_hash = self._hash_token(coordination_token)
@@ -46,8 +48,10 @@ class CoordinationManager:
         self.orchestrator_ttl = timedelta(seconds=orchestrator_ttl_seconds)
         if self.backend == "file":
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        elif self.backend == "http" and not self.http_url:
-            raise CoordinationError("COORDINATION_HTTP_URL is required when COORDINATION_BACKEND=http.")
+        elif self.backend == "http" and not self.http_urls:
+            raise CoordinationError(
+                "COORDINATION_HTTP_URL or COORDINATION_HTTP_URLS is required when COORDINATION_BACKEND=http."
+            )
 
     def heartbeat(self) -> MachineNode:
         state = self._load()
@@ -270,24 +274,37 @@ class CoordinationManager:
         self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
     def _http_load(self) -> dict:
-        response = httpx.get(
-            f"{self.http_url}/state",
-            headers=self._http_headers(),
-            params={"cluster_id": self.cluster_id},
-            timeout=20,
-        )
-        response.raise_for_status()
-        return response.json()
+        return self._http_request("GET").json()
 
     def _http_save(self, state: dict) -> None:
-        response = httpx.put(
-            f"{self.http_url}/state",
-            headers=self._http_headers(),
-            params={"cluster_id": self.cluster_id},
-            json=state,
-            timeout=20,
-        )
-        response.raise_for_status()
+        self._http_request("PUT", state)
+
+    def _http_request(self, method: str, state: dict | None = None) -> httpx.Response:
+        last_error: Exception | None = None
+        for url in self.http_urls:
+            try:
+                if method == "GET":
+                    response = httpx.get(
+                        f"{url}/state",
+                        headers=self._http_headers(),
+                        params={"cluster_id": self.cluster_id},
+                        timeout=8,
+                    )
+                else:
+                    response = httpx.put(
+                        f"{url}/state",
+                        headers=self._http_headers(),
+                        params={"cluster_id": self.cluster_id},
+                        json=state,
+                        timeout=8,
+                    )
+                response.raise_for_status()
+            except (httpx.HTTPError, httpx.TimeoutException) as exc:
+                last_error = exc
+                continue
+            self.http_url = url
+            return response
+        raise CoordinationError(f"No reachable coordinator URL. Last error: {last_error}") from last_error
 
     def _http_headers(self) -> dict[str, str]:
         headers = {}
@@ -310,6 +327,15 @@ class CoordinationManager:
         if not clean:
             return ""
         return hashlib.sha256(clean.encode("utf-8")).hexdigest()
+
+    def _normalize_urls(self, primary: str, additional: str) -> list[str]:
+        raw_items = [primary, *additional.replace("\n", ",").split(",")]
+        urls = []
+        for item in raw_items:
+            url = item.strip().rstrip("/")
+            if url and url not in urls:
+                urls.append(url)
+        return urls
 
     def _machine_from_json(self, item: dict) -> MachineNode:
         return MachineNode(

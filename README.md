@@ -70,6 +70,7 @@ In chat, use commands like:
 /tasks
 /connect
 /host-coordinator
+/connect-coordinator
 /connect-http
 /connect-file
 ```
@@ -119,7 +120,9 @@ Use **Host Coordinator** or `/host-coordinator` on one running machine to start 
 .\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"
 ```
 
-Use `/connect-http` or the **Configure HTTP** button on the other machines to save the coordinator URL, cluster ID, token, machine ID, and backend list from the UI. These values are saved to ignored local runtime config in `runtime_config.json`; restart the UI/worker after saving.
+Use `/connect-coordinator` or the **Connect to Coordinator** button on the other machines to save coordinator URL, fallback URLs, cluster ID, token, machine ID, backend list, and optional auto-host fallback from the UI. These values are saved to ignored local runtime config in `runtime_config.json`; restart the UI/worker after saving.
+
+When auto-host fallback is enabled, a machine that cannot reach any saved coordinator URL can start its own coordinator on `COORDINATOR_PORT`. Other machines need that fallback URL saved too, so add multiple coordinator URLs when you have more than one possible host.
 
 ## Worker Launch
 
@@ -151,7 +154,7 @@ Runtime files are ignored: `.env`, `coordination_state.json`, `workspace_state.j
 
 For a shared swarm, give friends the same `CLUSTER_ID`, `COORDINATION_TOKEN`, and either the shared state location or HTTP coordinator URL out of band. Do not commit those values.
 
-You can enter the shared coordinator URL and token through the UI with `/connect-http`, so friends do not have to edit `.env` for normal joining.
+You can enter the shared coordinator URL and token through the UI with `/connect-coordinator`, so friends do not have to edit `.env` for normal joining. `/connect-http` still works as an alias.
 
 ## OpenSwarm Notes
 

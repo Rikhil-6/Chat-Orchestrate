@@ -23,6 +23,7 @@ def build_coordination(settings: Settings | None = None) -> CoordinationManager:
         settings.coordination_token,
         settings.coordination_backend,
         settings.coordination_http_url,
+        settings.coordination_http_urls,
     )
 
 

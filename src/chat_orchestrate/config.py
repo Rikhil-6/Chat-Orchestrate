@@ -25,8 +25,10 @@ class Settings(BaseSettings):
     coordination_state_path: Path = Path("./coordination_state.json")
     coordination_backend: str = "file"
     coordination_http_url: str = ""
+    coordination_http_urls: str = ""
     cluster_id: str = "local"
     coordination_token: str = ""
+    coordinator_auto_host: bool = False
     coordinator_host: str = "127.0.0.1"
     coordinator_port: int = 8765
     machine_id: str = ""

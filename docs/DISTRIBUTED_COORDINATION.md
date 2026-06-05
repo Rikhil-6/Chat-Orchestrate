@@ -21,6 +21,7 @@ Distributed coordination lets multiple app instances share one coordination stat
 /workspace-modes
 /connect
 /host-coordinator
+/connect-coordinator
 /connect-http
 /connect-file
 ```
@@ -29,7 +30,7 @@ The Chainlit app also renders a **Machine Status** panel on startup. Use its but
 
 Use `/host-coordinator` or the **Host Coordinator** button on one running machine to start the shared HTTP coordinator from the UI. It asks for cluster ID, token, port, machine ID, and backend list, then shows the URLs other machines should use.
 
-Use `/connect-http` or the **Configure HTTP** button to save coordinator URL, cluster ID, token, machine ID, and backend list from the UI. The app writes these values to ignored local `runtime_config.json`. Restart the UI or worker after saving so startup settings are rebuilt.
+Use `/connect-coordinator` or the **Connect to Coordinator** button to save coordinator URL, fallback URLs, cluster ID, token, machine ID, backend list, and optional auto-host fallback from the UI. The app writes these values to ignored local `runtime_config.json`. Restart the UI or worker after saving so startup settings are rebuilt.
 
 ## Election
 
@@ -103,7 +104,7 @@ AGENT_BACKENDS=codex,claude-code,simulated
 
 The coordinator requires a bearer token when `COORDINATION_TOKEN` is set. Keep the token out of git and share it out of band.
 
-Instead of editing `.env`, open the app and run `/connect-http` on each machine. Paste the coordinator URL, cluster ID, shared token, machine ID, and backend list when prompted.
+Instead of editing `.env`, open the app and run `/connect-coordinator` on each machine. Paste the coordinator URL, cluster ID, shared token, machine ID, and backend list when prompted. `/connect-http` remains as a compatibility alias.
 
 For production-grade coordination, replace the JSON persistence layer behind the coordinator with Redis, Postgres, or another store that supports locks and atomic updates.
 
@@ -113,7 +114,7 @@ If two machines are on the same Wi-Fi but each app shows only `Online 1`, they a
 
 1. Pick one machine and click **Host Coordinator**.
 2. Copy one of the LAN URLs it shows.
-3. On every other UI or worker, click **Configure HTTP** and paste that URL.
+3. On every other UI or worker, click **Connect to Coordinator** and paste that URL.
 4. Use the same `CLUSTER_ID` and `COORDINATION_TOKEN` on every machine.
 5. Restart the UI or worker on each machine and open `/machines`.
 
@@ -128,8 +129,10 @@ Windows joiner `.env`:
 ```env
 COORDINATION_BACKEND=http
 COORDINATION_HTTP_URL=http://192.168.1.25:8765
+COORDINATION_HTTP_URLS=http://192.168.1.25:8765,http://192.168.1.26:8765
 CLUSTER_ID=friends-project
 COORDINATION_TOKEN=share-this-out-of-band
+COORDINATOR_AUTO_HOST=true
 MACHINE_ID=laptop-b
 AGENT_BACKENDS=codex
 ```
@@ -154,6 +157,16 @@ COORDINATION_TOKEN=share-this-out-of-band
 ```
 
 The token is not discovery by itself. It gates access after a machine already knows the coordinator URL.
+
+## Coordinator Failover
+
+There is no discovery if every coordinator URL is gone. The practical failover path is:
+
+- Save more than one candidate URL with **Connect to Coordinator**.
+- Enable auto-host fallback on machines that are allowed to take over.
+- Keep the same cluster ID and token everywhere.
+
+When a machine cannot reach any saved coordinator URL and auto-host fallback is enabled, it starts a coordinator on `COORDINATOR_PORT` and rewrites its local runtime config to prefer its own URL. Other machines will find it if that URL is already in their fallback list.
 
 ## Backend Mixes
 

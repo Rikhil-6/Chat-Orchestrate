@@ -32,6 +32,7 @@ coordination = CoordinationManager(
     settings.coordination_token,
     settings.coordination_backend,
     settings.coordination_http_url,
+    settings.coordination_http_urls,
 )
 orchestrator = Orchestrator(build_swarm_client(settings), settings.default_agents, coordination)
 coordinator_process: subprocess.Popen | None = None
@@ -53,8 +54,16 @@ async def on_chat_start() -> None:
         local_node = coordination.heartbeat()
         orchestrator_node = coordination.get_or_elect_orchestrator()
     except CoordinationError as exc:
-        await cl.Message(content=f"Coordination error: {exc}").send()
-        return
+        if await try_auto_host_coordinator(exc):
+            try:
+                local_node = coordination.heartbeat()
+                orchestrator_node = coordination.get_or_elect_orchestrator()
+            except CoordinationError as retry_exc:
+                await cl.Message(content=f"Coordination error: {retry_exc}").send()
+                return
+        else:
+            await cl.Message(content=f"Coordination error: {exc}").send()
+            return
     existing = spaces.list_spaces()
     if existing:
         cl.user_session.set("project_space", existing[0])
@@ -76,7 +85,7 @@ async def on_chat_start() -> None:
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
             "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
-            "`/connect`, `/host-coordinator`, `/connect-http`, `/connect-file`."
+            "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`."
         )
     ).send()
     await show_machines()
@@ -170,6 +179,8 @@ async def handle_command(text: str) -> None:
             await show_connection()
         elif command == "/host-coordinator":
             await host_coordinator()
+        elif command == "/connect-coordinator":
+            await configure_http_connection()
         elif command == "/connect-http":
             await configure_http_connection()
         elif command == "/connect-file":
@@ -231,10 +242,15 @@ async def show_connection() -> None:
 
 
 async def configure_http_connection() -> None:
-    coordinator_url = await ask_text(
-        "Coordinator URL, e.g. `http://192.168.1.25:8765` or an HTTPS tunnel URL."
+    coordinator_urls_text = await ask_text(
+        "Coordinator URL or URLs. Use one URL, or comma-separate fallback URLs.",
+        settings.coordination_http_urls or settings.coordination_http_url,
     )
-    if coordinator_url is None:
+    if coordinator_urls_text is None:
+        return
+    coordinator_urls = parse_urls(coordinator_urls_text)
+    if not coordinator_urls:
+        await cl.Message(content="Add at least one coordinator URL.").send()
         return
     cluster_id = await ask_text("Cluster ID.", settings.cluster_id)
     if cluster_id is None:
@@ -242,24 +258,32 @@ async def configure_http_connection() -> None:
     token = await ask_text("Shared coordination token.", settings.coordination_token)
     if token is None:
         return
+    if not token:
+        await cl.Message(content="A shared token is required before joining a coordinator.").send()
+        return
     machine_id = await ask_text("This machine ID.", settings.machine_id or socket.gethostname().lower())
     if machine_id is None:
         return
     backends = await ask_text("Agent backends for this machine.", ",".join(agent_backends))
     if backends is None:
         return
+    auto_host = await ask_text("Allow this machine to auto-host if all coordinator URLs fail? yes/no", "no")
+    if auto_host is None:
+        return
 
     save_runtime_env(
         {
             "COORDINATION_BACKEND": "http",
-            "COORDINATION_HTTP_URL": coordinator_url,
+            "COORDINATION_HTTP_URL": coordinator_urls[0],
+            "COORDINATION_HTTP_URLS": ",".join(coordinator_urls),
             "CLUSTER_ID": cluster_id,
             "COORDINATION_TOKEN": token,
+            "COORDINATOR_AUTO_HOST": str(is_yes(auto_host)).lower(),
             "MACHINE_ID": machine_id,
             "AGENT_BACKENDS": backends,
         }
     )
-    await cl.Message(content=restart_required_message("HTTP coordinator settings saved.")).send()
+    await cl.Message(content=restart_required_message("Coordinator connection saved.")).send()
 
 
 async def host_coordinator() -> None:
@@ -274,6 +298,9 @@ async def host_coordinator() -> None:
         return
     token = await ask_text("Shared coordination token.", settings.coordination_token)
     if token is None:
+        return
+    if not token:
+        await cl.Message(content="A shared token is required before hosting a coordinator.").send()
         return
     raw_port = await ask_text("Coordinator port.", str(settings.coordinator_port))
     if raw_port is None:
@@ -291,28 +318,7 @@ async def host_coordinator() -> None:
     if backends is None:
         return
 
-    state_path = hosted_state_path(cluster_id)
-    coordinator_process = subprocess.Popen(
-        [
-            sys.executable,
-            "scripts/run_coordinator.py",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(port),
-            "--cluster-id",
-            cluster_id,
-            "--token",
-            token,
-            "--state-path",
-            str(state_path),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    await asyncio.sleep(1)
-    if coordinator_process.poll() is not None:
+    if not await start_hosted_coordinator(cluster_id, token, port):
         await cl.Message(
             content=(
                 "Coordinator did not stay running. The port may already be in use, or the host "
@@ -323,12 +329,15 @@ async def host_coordinator() -> None:
         return
 
     self_url = default_coordinator_url(port)
+    candidate_urls = local_coordinator_urls(port)
     save_runtime_env(
         {
             "COORDINATION_BACKEND": "http",
             "COORDINATION_HTTP_URL": self_url,
+            "COORDINATION_HTTP_URLS": ",".join(candidate_urls),
             "CLUSTER_ID": cluster_id,
             "COORDINATION_TOKEN": token,
+            "COORDINATOR_AUTO_HOST": "true",
             "COORDINATOR_HOST": "0.0.0.0",
             "COORDINATOR_PORT": str(port),
             "MACHINE_ID": machine_id,
@@ -497,8 +506,8 @@ def machine_actions() -> list[cl.Action]:
         ),
         cl.Action(
             name="configure_http",
-            label="Configure HTTP",
-            tooltip="Save coordinator URL and cluster settings through the UI.",
+            label="Connect to Coordinator",
+            tooltip="Join a hosted coordinator through the UI.",
             icon="plug",
             payload={},
         ),
@@ -561,6 +570,7 @@ def command_help() -> str:
         "- `/backends`\n"
         "- `/connect`\n"
         "- `/host-coordinator`\n"
+        "- `/connect-coordinator`\n"
         "- `/connect-http`\n"
         "- `/connect-file`"
     )
@@ -586,6 +596,8 @@ def connection_cards() -> str:
             "> ### Current Mode\n"
             f"> Backend: `{backend}`  \n"
             f"> Coordinator URL: `{target}`  \n"
+            f"> Fallback URLs: `{settings.coordination_http_urls or 'not set'}`  \n"
+            f"> Auto-host fallback: `{settings.coordinator_auto_host}`  \n"
             f"> Cluster: `{settings.cluster_id}`  \n"
             f"> Token: `{token_state}`  \n"
             f"> Saved UI config: `{RUNTIME_CONFIG_PATH}`\n\n"
@@ -616,7 +628,8 @@ def connection_cards() -> str:
         '-ClusterId friends-project -Token "share-this-out-of-band"\n'
         "```\n\n"
         f"> Other machines can try: {lan_urls}\n\n"
-        "> Set this on every UI or worker:\n\n"
+        "> On every other UI or worker, click **Connect to Coordinator** and paste the URL.\n\n"
+        "> The manual env shape is:\n\n"
         "```env\n"
         "COORDINATION_BACKEND=http\n"
         "COORDINATION_HTTP_URL=http://<coordinator-lan-ip>:8765\n"
@@ -643,9 +656,14 @@ def local_lan_addresses() -> list[str]:
 
 
 def default_coordinator_url(port: int) -> str:
+    return local_coordinator_urls(port)[0]
+
+
+def local_coordinator_urls(port: int) -> list[str]:
     addresses = local_lan_addresses()
-    host = addresses[0] if addresses else "127.0.0.1"
-    return f"http://{host}:{port}"
+    if not addresses:
+        addresses = ["127.0.0.1"]
+    return [f"http://{address}:{port}" for address in addresses]
 
 
 def hosted_state_path(cluster_id: str) -> Path:
@@ -654,20 +672,98 @@ def hosted_state_path(cluster_id: str) -> Path:
 
 
 def hosted_coordinator_message(cluster_id: str, port: int) -> str:
-    urls = [f"http://{address}:{port}" for address in local_lan_addresses()]
-    if not urls:
-        urls = [f"http://127.0.0.1:{port}"]
+    urls = local_coordinator_urls(port)
     url_lines = "\n".join(f"- `{url}`" for url in urls)
     return (
         "## Coordinator Hosted From This Machine\n\n"
         f"Cluster: `{cluster_id}`\n\n"
         "Other machines should use one of these coordinator URLs:\n\n"
         f"{url_lines}\n\n"
-        "On each other app instance, click **Configure HTTP** or run `/connect-http`, paste one of "
-        "the URLs, then use the same cluster ID and token.\n\n"
+        "On each other app instance, click **Connect to Coordinator** or run `/connect-coordinator`, "
+        "paste one of the URLs, then use the same cluster ID and token.\n\n"
         f"This machine's local runtime config was saved to `{RUNTIME_CONFIG_PATH}`. Restart this UI "
         "after hosting if you want it to join through the hosted coordinator too."
     )
+
+
+async def try_auto_host_coordinator(exc: CoordinationError) -> bool:
+    if settings.coordination_backend.lower().strip() != "http":
+        return False
+    if not settings.coordinator_auto_host:
+        return False
+    if not settings.coordination_token:
+        await cl.Message(content=f"Coordinator unavailable and auto-host is disabled without a token: {exc}").send()
+        return False
+    await cl.Message(
+        content=(
+            "Saved coordinator URLs are unavailable. Auto-host fallback is enabled, so this machine "
+            "is starting a local coordinator."
+        )
+    ).send()
+    started = await start_hosted_coordinator(
+        settings.cluster_id,
+        settings.coordination_token,
+        settings.coordinator_port,
+    )
+    if not started:
+        return False
+    fallback_urls = local_coordinator_urls(settings.coordinator_port)
+    coordination.http_urls = [*fallback_urls, *[url for url in coordination.http_urls if url not in fallback_urls]]
+    coordination.http_url = coordination.http_urls[0]
+    save_runtime_env(
+        {
+            "COORDINATION_BACKEND": "http",
+            "COORDINATION_HTTP_URL": coordination.http_url,
+            "COORDINATION_HTTP_URLS": ",".join(coordination.http_urls),
+            "CLUSTER_ID": settings.cluster_id,
+            "COORDINATION_TOKEN": settings.coordination_token,
+            "COORDINATOR_AUTO_HOST": "true",
+            "COORDINATOR_HOST": "0.0.0.0",
+            "COORDINATOR_PORT": str(settings.coordinator_port),
+        }
+    )
+    return True
+
+
+async def start_hosted_coordinator(cluster_id: str, token: str, port: int) -> bool:
+    global coordinator_process
+    if coordinator_process and coordinator_process.poll() is None:
+        return True
+    state_path = hosted_state_path(cluster_id)
+    coordinator_process = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_coordinator.py",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--cluster-id",
+            cluster_id,
+            "--token",
+            token,
+            "--state-path",
+            str(state_path),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    await asyncio.sleep(1)
+    return coordinator_process.poll() is None
+
+
+def parse_urls(text: str) -> list[str]:
+    urls = []
+    for item in text.replace("\n", ",").split(","):
+        url = item.strip().rstrip("/")
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def is_yes(text: str) -> bool:
+    return text.strip().lower() in {"y", "yes", "true", "1", "on"}
 
 
 def restart_required_message(title: str) -> str:
