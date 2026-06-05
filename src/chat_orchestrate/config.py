@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     open_swarm_api_key: str = ""
     open_swarm_model: str = "codey"
     open_swarm_timeout_seconds: int = 90
+    openai_api_key: str = ""
+    codex_api_model: str = "gpt-5.3-codex"
 
     workspaces_root: Path = Path("./workspaces")
     workspace_state_path: Path = Path("./workspace_state.json")

@@ -10,6 +10,7 @@ from .backends import (
     backend_execution_hint,
     command_for_backend,
     detect_agent_backends,
+    extract_response_text,
 )
 from .config import Settings
 from .models import AgentSpec, ProjectSpace
@@ -79,10 +80,12 @@ class LocalAgentCliClient(SwarmClient):
         settings: Settings,
         preferred_backend: str = "auto",
         command_overrides: dict[str, str] | None = None,
+        openai_api_key: str = "",
     ) -> None:
         self.settings = settings
         self.preferred_backend = preferred_backend
         self.command_overrides = command_overrides or settings.command_overrides
+        self.openai_api_key = openai_api_key.strip() or settings.openai_api_key.strip()
         self.backends = [
             backend
             for backend in detect_agent_backends(settings.configured_backends, self.command_overrides)
@@ -107,6 +110,10 @@ class LocalAgentCliClient(SwarmClient):
             output = await self._run_backend(backend, prompt)
             if output:
                 return f"`{backend}` local response\n\n{output}"
+            if backend == CODEX_BACKEND:
+                api_output = await self._run_codex_api(prompt)
+                if api_output:
+                    return f"`{backend}` API response\n\n{api_output}"
             if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
                 return (
                     f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
@@ -147,6 +154,25 @@ class LocalAgentCliClient(SwarmClient):
         output = stdout.decode(errors="replace").strip() or stderr.decode(errors="replace").strip()
         return output
 
+    async def _run_codex_api(self, prompt: str) -> str:
+        if not self.openai_api_key:
+            return ""
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.local_agent_timeout_seconds) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={"Authorization": f"Bearer {self.openai_api_key}"},
+                    json={
+                        "model": self.settings.codex_api_model,
+                        "input": prompt,
+                    },
+                )
+            if response.status_code >= 400:
+                return f"OpenAI API request failed: HTTP {response.status_code} {response.text}"
+            return extract_response_text(response.json())
+        except httpx.HTTPError as exc:
+            return f"OpenAI API request failed: {exc}"
+
     def _command_for_backend(self, backend: str) -> str | None:
         return command_for_backend(backend, self.command_overrides)
 
@@ -165,9 +191,11 @@ def build_swarm_client(
     settings: Settings,
     preferred_backend: str = "auto",
     command_overrides: dict[str, str] | None = None,
+    openai_api_key: str = "",
 ) -> SwarmClient:
     if settings.use_open_swarm:
         return OpenSwarmClient(settings)
     if settings.use_local_agent_chat:
-        return LocalAgentCliClient(settings, preferred_backend, command_overrides)
+        return LocalAgentCliClient(settings, preferred_backend, command_overrides, openai_api_key)
     return LocalPreviewSwarmClient()
+

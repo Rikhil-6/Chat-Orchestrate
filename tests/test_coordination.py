@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from chat_orchestrate.backends import CODEX_BACKEND, command_for_backend, run_task
+from chat_orchestrate.backends import CODEX_BACKEND, command_for_backend, extract_response_text, run_task
 from chat_orchestrate.coordination import CoordinationManager
 from chat_orchestrate.models import ProjectSpace
 
@@ -139,6 +139,16 @@ def test_windows_store_codex_resource_is_not_treated_as_cli(tmp_path: Path, monk
     monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "pf86"))
 
     assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: "None"}) is None
+
+
+def test_extract_response_text_from_output_text() -> None:
+    assert extract_response_text({"output_text": "hello"}) == "hello"
+
+
+def test_extract_response_text_from_output_content() -> None:
+    payload = {"output": [{"content": [{"type": "output_text", "text": "hello from codex"}]}]}
+
+    assert extract_response_text(payload) == "hello from codex"
 
 
 def test_coordination_token_mismatch_is_rejected(tmp_path: Path) -> None:

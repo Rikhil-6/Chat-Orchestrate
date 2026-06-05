@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 from .models import DelegatedTask
 
 
@@ -64,6 +66,8 @@ def run_task(
     task: DelegatedTask,
     dry_run: bool = True,
     command_overrides: dict[str, str] | None = None,
+    openai_api_key: str = "",
+    codex_api_model: str = "gpt-5.3-codex",
 ) -> str:
     if dry_run or task.preferred_backend == SIMULATED_BACKEND:
         return (
@@ -76,6 +80,8 @@ def run_task(
 
     command = command_for_backend(task.preferred_backend, command_overrides)
     if command is None:
+        if task.preferred_backend == CODEX_BACKEND and openai_api_key.strip():
+            return run_codex_api_task(task, openai_api_key.strip(), codex_api_model)
         return (
             f"Backend `{task.preferred_backend}` is not executable on this machine.\n\n"
             f"{backend_execution_hint(task.preferred_backend)}"
@@ -100,6 +106,46 @@ def run_task(
     result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180)
     output = result.stdout.strip() or result.stderr.strip()
     return output or f"`{task.preferred_backend}` exited with code {result.returncode}."
+
+
+def run_codex_api_task(task: DelegatedTask, api_key: str, model: str) -> str:
+    prompt = (
+        f"You are the `{task.role}` agent for a distributed project run.\n\n"
+        f"Task: {task.title}\n"
+        f"Project space: {task.project}\n"
+        f"Goal:\n{task.goal}\n\n"
+        "Return a concrete, useful result for your assigned role."
+    )
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model, "input": prompt},
+            timeout=180,
+        )
+    except httpx.HTTPError as exc:
+        return f"OpenAI API request failed: {exc}"
+    if response.status_code >= 400:
+        return f"OpenAI API request failed: HTTP {response.status_code} {response.text}"
+    return extract_response_text(response.json())
+
+
+def extract_response_text(payload: dict) -> str:
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    parts = []
+    for item in payload.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []):
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n\n".join(parts).strip() or "No text output returned by the OpenAI API."
 
 
 def _is_available(backend: str, command_overrides: dict[str, str] | None = None) -> bool:

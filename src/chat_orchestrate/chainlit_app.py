@@ -111,6 +111,8 @@ async def ui_worker_loop() -> None:
                 task,
                 not settings.use_local_agent_chat,
                 load_command_overrides(),
+                load_openai_api_key(),
+                settings.codex_api_model,
             )
         except Exception as exc:  # pragma: no cover - defensive UI worker boundary
             try:
@@ -204,7 +206,12 @@ async def on_message(message: cl.Message) -> None:
     selected_backend = cl.user_session.get("agent_backend") or "auto"
     refresh_advertised_backends(selected_backend)
     turn_orchestrator = Orchestrator(
-        build_swarm_client(settings, selected_backend, load_command_overrides()),
+        build_swarm_client(
+            settings,
+            selected_backend,
+            load_command_overrides(),
+            load_openai_api_key(),
+        ),
         settings.default_agents,
         coordination,
         settings.delegated_task_wait_seconds,
@@ -226,6 +233,7 @@ async def on_message(message: cl.Message) -> None:
 async def on_settings_update(updated_settings: dict) -> None:
     backend = str(updated_settings.get("agent_backend", "auto"))
     restore_history = bool(updated_settings.get("restore_history", True))
+    openai_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
     codex_command = validated_command_preference(
         CODEX_BACKEND,
         clean_command_input(updated_settings.get("codex_command", "")),
@@ -236,6 +244,7 @@ async def on_settings_update(updated_settings: dict) -> None:
     )
     cl.user_session.set("agent_backend", backend)
     cl.user_session.set("restore_history", restore_history)
+    cl.user_session.set("openai_api_key", openai_api_key)
     cl.user_session.set("codex_command", codex_command)
     cl.user_session.set("claude_command", claude_command)
     refresh_advertised_backends(backend)
@@ -352,6 +361,7 @@ async def setup_chat_settings() -> None:
     if selected_backend not in unique_backend_values:
         selected_backend = "auto"
     restore_history = preferences.get("restore_history", "true").lower() != "false"
+    openai_api_key = ""
     codex_command = validated_command_preference(
         CODEX_BACKEND,
         clean_command_input(preferences.get("codex_command", settings.codex_command)),
@@ -364,6 +374,7 @@ async def setup_chat_settings() -> None:
     claude_initial = claude_command or command_for_backend(CLAUDE_CODE_BACKEND, settings.command_overrides) or ""
     cl.user_session.set("agent_backend", selected_backend)
     cl.user_session.set("restore_history", restore_history)
+    cl.user_session.set("openai_api_key", openai_api_key)
     cl.user_session.set("codex_command", codex_initial)
     cl.user_session.set("claude_command", claude_initial)
     refresh_advertised_backends(selected_backend)
@@ -387,6 +398,13 @@ async def setup_chat_settings() -> None:
                 label="Restore local chat on refresh",
                 initial=restore_history,
                 tooltip="Replay recent local chat records when the page reconnects.",
+            ),
+            TextInput(
+                id="openai_api_key",
+                label="OpenAI API Key",
+                initial=openai_api_key,
+                placeholder="Optional session key for Codex API fallback",
+                tooltip="Used only in this Chainlit session; it is not saved to ui_state.json.",
             ),
             TextInput(
                 id="codex_command",
@@ -435,6 +453,14 @@ def load_command_overrides() -> dict[str, str]:
     }
 
 
+def load_openai_api_key() -> str:
+    try:
+        session_key = cl.user_session.get("openai_api_key")
+    except Exception:
+        session_key = ""
+    return clean_secret_input(session_key) or settings.openai_api_key.strip()
+
+
 def validated_command_preference(backend: str, command: str) -> str:
     if command and command_is_runnable(backend, command, settings.command_overrides):
         return command
@@ -443,6 +469,11 @@ def validated_command_preference(backend: str, command: str) -> str:
 
 def clean_command_input(value: object) -> str:
     clean = str(value or "").strip().strip('"').strip("'")
+    return "" if clean.lower() in {"none", "null", "undefined"} else clean
+
+
+def clean_secret_input(value: object) -> str:
+    clean = str(value or "").strip()
     return "" if clean.lower() in {"none", "null", "undefined"} else clean
 
 

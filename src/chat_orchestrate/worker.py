@@ -72,7 +72,13 @@ async def run_worker(settings: Settings | None = None) -> None:
             task.preferred_backend,
         )
         try:
-            result = run_task(task, dry_run=settings.worker_dry_run, command_overrides=settings.command_overrides)
+            result = run_task(
+                task,
+                dry_run=settings.worker_dry_run,
+                command_overrides=settings.command_overrides,
+                openai_api_key=settings.openai_api_key,
+                codex_api_model=settings.codex_api_model,
+            )
         except Exception as exc:  # pragma: no cover - defensive worker boundary
             try:
                 coordination.complete_task(task.task_id, str(exc), status="failed")
