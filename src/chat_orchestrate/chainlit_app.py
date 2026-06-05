@@ -12,7 +12,7 @@ from pathlib import Path
 
 import chainlit as cl
 import httpx
-from chainlit.input_widget import Select, Switch
+from chainlit.input_widget import Select, Switch, TextInput
 
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
@@ -39,7 +39,7 @@ from chat_orchestrate.ui_state import (
 )
 
 settings = get_settings()
-agent_backends = detect_agent_backends(settings.configured_backends)
+agent_backends = detect_agent_backends(settings.configured_backends, settings.command_overrides)
 agent_roles = [*settings.default_agents, "backend", "frontend"]
 agent_roles = list(dict.fromkeys(agent_roles))
 spaces = ProjectSpaceManager(settings.workspaces_root, settings.workspace_state_path)
@@ -106,6 +106,7 @@ async def ui_worker_loop() -> None:
                 run_task,
                 task,
                 not settings.use_local_agent_chat,
+                load_command_overrides(),
             )
         except Exception as exc:  # pragma: no cover - defensive UI worker boundary
             try:
@@ -199,7 +200,7 @@ async def on_message(message: cl.Message) -> None:
     selected_backend = cl.user_session.get("agent_backend") or "auto"
     refresh_advertised_backends(selected_backend)
     turn_orchestrator = Orchestrator(
-        build_swarm_client(settings, selected_backend),
+        build_swarm_client(settings, selected_backend, load_command_overrides()),
         settings.default_agents,
         coordination,
         settings.delegated_task_wait_seconds,
@@ -221,13 +222,19 @@ async def on_message(message: cl.Message) -> None:
 async def on_settings_update(updated_settings: dict) -> None:
     backend = str(updated_settings.get("agent_backend", "auto"))
     restore_history = bool(updated_settings.get("restore_history", True))
+    codex_command = str(updated_settings.get("codex_command", "")).strip()
+    claude_command = str(updated_settings.get("claude_command", "")).strip()
     cl.user_session.set("agent_backend", backend)
     cl.user_session.set("restore_history", restore_history)
+    cl.user_session.set("codex_command", codex_command)
+    cl.user_session.set("claude_command", claude_command)
     refresh_advertised_backends(backend)
     save_preferences(
         {
             "agent_backend": backend,
             "restore_history": str(restore_history).lower(),
+            "codex_command": codex_command,
+            "claude_command": claude_command,
         }
     )
     await update_cluster_roster()
@@ -335,8 +342,12 @@ async def setup_chat_settings() -> None:
     if selected_backend not in unique_backend_values:
         selected_backend = "auto"
     restore_history = preferences.get("restore_history", "true").lower() != "false"
+    codex_command = preferences.get("codex_command", settings.codex_command)
+    claude_command = preferences.get("claude_command", settings.claude_command)
     cl.user_session.set("agent_backend", selected_backend)
     cl.user_session.set("restore_history", restore_history)
+    cl.user_session.set("codex_command", codex_command)
+    cl.user_session.set("claude_command", claude_command)
     refresh_advertised_backends(selected_backend)
     await cl.ChatSettings(
         [
@@ -353,13 +364,27 @@ async def setup_chat_settings() -> None:
                 initial=restore_history,
                 tooltip="Replay recent local chat records when the page reconnects.",
             ),
+            TextInput(
+                id="codex_command",
+                label="Codex Command",
+                initial=codex_command,
+                placeholder="codex, codex.cmd, or full path",
+                tooltip="Command used when Local Agent is codex.",
+            ),
+            TextInput(
+                id="claude_command",
+                label="Claude Command",
+                initial=claude_command,
+                placeholder="claude, claude.cmd, or full path",
+                tooltip="Command used when Local Agent is claude-code.",
+            ),
         ]
     ).send()
 
 
 def refresh_advertised_backends(selected_backend: str = "auto") -> None:
     global agent_backends
-    detected = detect_agent_backends(settings.configured_backends)
+    detected = detect_agent_backends(settings.configured_backends, load_command_overrides())
     advertised = []
     for backend in [*detected, selected_backend]:
         if backend and backend != "auto" and backend not in advertised:
@@ -368,6 +393,20 @@ def refresh_advertised_backends(selected_backend: str = "auto") -> None:
         advertised = [SIMULATED_BACKEND]
     agent_backends = advertised
     coordination.agent_backends = advertised
+
+
+def load_command_overrides() -> dict[str, str]:
+    try:
+        codex_command = cl.user_session.get("codex_command")
+        claude_command = cl.user_session.get("claude_command")
+    except Exception:
+        codex_command = None
+        claude_command = None
+    preferences = load_preferences()
+    return {
+        CODEX_BACKEND: str(codex_command or preferences.get("codex_command", settings.codex_command)).strip(),
+        CLAUDE_CODE_BACKEND: str(claude_command or preferences.get("claude_command", settings.claude_command)).strip(),
+    }
 
 
 async def restore_chat_history() -> None:
@@ -874,7 +913,7 @@ def local_chat_backend_label() -> str:
     selected_backend = selected_chat_backend()
     if selected_backend != "auto":
         return selected_backend
-    available = [item.name for item in backend_availability(agent_backends) if item.available]
+    available = [item.name for item in backend_availability(agent_backends, load_command_overrides()) if item.available]
     for backend in available:
         if backend != "simulated":
             return backend
@@ -937,7 +976,7 @@ def command_help() -> str:
 
 
 def backend_status_cards() -> str:
-    items = backend_availability(agent_backends)
+    items = backend_availability(agent_backends, load_command_overrides())
     lines = []
     for item in items:
         state = "available" if item.available else "configured"

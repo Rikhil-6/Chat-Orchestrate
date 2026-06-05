@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     worker_dry_run: bool = True
     use_local_agent_chat: bool = True
     local_agent_timeout_seconds: int = 180
+    codex_command: str = ""
+    claude_command: str = ""
     delegated_task_wait_seconds: float = 90.0
     default_agent_set: str = "coordinator,researcher,engineer,reviewer,documenter"
 
@@ -48,6 +50,13 @@ class Settings(BaseSettings):
     @property
     def configured_backends(self) -> list[str]:
         return [backend.strip() for backend in self.agent_backends.split(",") if backend.strip()]
+
+    @property
+    def command_overrides(self) -> dict[str, str]:
+        return {
+            "codex": self.codex_command.strip(),
+            "claude-code": self.claude_command.strip(),
+        }
 
 
 @lru_cache(maxsize=1)

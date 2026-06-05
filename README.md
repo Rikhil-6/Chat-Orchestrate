@@ -52,7 +52,7 @@ Open Chainlit at [http://localhost:7860](http://localhost:7860).
 
 Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex` and `claude`; if neither is available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
 
-The Chainlit sidebar includes a **Local Agent** selector so you can explicitly choose `codex`, `claude-code`, or `auto` without editing `.env`. The selected backend is advertised to the cluster, and chat turns use that local CLI when it is reachable from the terminal that launched Chainlit. The app also keeps recent local chat records in ignored `ui_state.json`, so refreshing the page replays the last few messages. Use the sidebar toggle, **Clear History**, or `/clear-history` when you want a fresh local chat surface.
+The Chainlit sidebar includes a **Local Agent** selector so you can explicitly choose `codex`, `claude-code`, or `auto` without editing `.env`. The selected backend is advertised to the cluster, and chat turns use that local CLI when it is reachable from the terminal that launched Chainlit. If the app cannot find it, set **Codex Command** or **Claude Command** in the sidebar to `codex`, `codex.cmd`, `claude`, `claude.cmd`, or a full executable path. The app also keeps recent local chat records in ignored `ui_state.json`, so refreshing the page replays the last few messages. Use the sidebar toggle, **Clear History**, or `/clear-history` when you want a fresh local chat surface.
 
 ## Project Spaces
 

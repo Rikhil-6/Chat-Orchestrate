@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
-
 import httpx
 
-from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, SIMULATED_BACKEND, detect_agent_backends
+from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, SIMULATED_BACKEND, command_for_backend, detect_agent_backends
 from .config import Settings
 from .models import AgentSpec, ProjectSpace
 
@@ -69,12 +67,18 @@ class LocalPreviewSwarmClient(SwarmClient):
 class LocalAgentCliClient(SwarmClient):
     """Routes chat turns through locally installed agent CLIs when available."""
 
-    def __init__(self, settings: Settings, preferred_backend: str = "auto") -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        preferred_backend: str = "auto",
+        command_overrides: dict[str, str] | None = None,
+    ) -> None:
         self.settings = settings
         self.preferred_backend = preferred_backend
+        self.command_overrides = command_overrides or settings.command_overrides
         self.backends = [
             backend
-            for backend in detect_agent_backends(settings.configured_backends)
+            for backend in detect_agent_backends(settings.configured_backends, self.command_overrides)
             if backend != SIMULATED_BACKEND
         ]
         self.preview = LocalPreviewSwarmClient()
@@ -99,8 +103,8 @@ class LocalAgentCliClient(SwarmClient):
             if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
                 return (
                     f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
-                    f"Expected command: `{self._command_for_backend(backend) or backend}`\n\n"
-                    "Install it or restart Chainlit from a terminal where that command is on `PATH`."
+                    f"Tried command: `{self._configured_command_label(backend)}`\n\n"
+                    "Set the command/path in the sidebar, or restart Chainlit from a terminal where that command is on `PATH`."
                 )
         return await self.preview.run_agent(agent, project, goal, context)
 
@@ -137,16 +141,22 @@ class LocalAgentCliClient(SwarmClient):
         return output
 
     def _command_for_backend(self, backend: str) -> str | None:
-        if backend == CODEX_BACKEND:
-            return shutil.which("codex")
-        if backend == CLAUDE_CODE_BACKEND:
-            return shutil.which("claude")
-        return None
+        return command_for_backend(backend, self.command_overrides)
+
+    def _configured_command_label(self, backend: str) -> str:
+        configured = self.command_overrides.get(backend, "").strip()
+        if configured:
+            return configured
+        return "codex" if backend == CODEX_BACKEND else "claude" if backend == CLAUDE_CODE_BACKEND else backend
 
 
-def build_swarm_client(settings: Settings, preferred_backend: str = "auto") -> SwarmClient:
+def build_swarm_client(
+    settings: Settings,
+    preferred_backend: str = "auto",
+    command_overrides: dict[str, str] | None = None,
+) -> SwarmClient:
     if settings.use_open_swarm:
         return OpenSwarmClient(settings)
     if settings.use_local_agent_chat:
-        return LocalAgentCliClient(settings, preferred_backend)
+        return LocalAgentCliClient(settings, preferred_backend, command_overrides)
     return LocalPreviewSwarmClient()

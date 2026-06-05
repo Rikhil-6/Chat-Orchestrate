@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from chat_orchestrate.backends import run_task
+from chat_orchestrate.backends import CODEX_BACKEND, command_for_backend, run_task
 from chat_orchestrate.coordination import CoordinationManager
 from chat_orchestrate.models import ProjectSpace
 
@@ -103,6 +103,13 @@ def test_worker_claims_and_completes_matching_backend_task(tmp_path: Path) -> No
     assert task.preferred_backend == "codex"
     manager.complete_task(task.task_id, run_task(task, dry_run=True))
     assert manager.list_tasks()[0].status == "completed"
+
+
+def test_command_override_accepts_quoted_paths(tmp_path: Path) -> None:
+    executable = tmp_path / "codex.cmd"
+    executable.write_text("@echo off\n", encoding="utf-8")
+
+    assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: f'"{executable}"'}) == str(executable)
 
 
 def test_coordination_token_mismatch_is_rejected(tmp_path: Path) -> None:

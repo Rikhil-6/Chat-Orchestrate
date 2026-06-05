@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from .models import DelegatedTask
 
@@ -20,30 +21,44 @@ class BackendAvailability:
     command: str | None = None
 
 
-def detect_agent_backends(configured: list[str]) -> list[str]:
+def detect_agent_backends(configured: list[str], command_overrides: dict[str, str] | None = None) -> list[str]:
     requested = [item.lower() for item in configured]
     if not requested or requested == ["auto"]:
         detected = [SIMULATED_BACKEND]
-        if shutil.which("codex"):
+        if command_for_backend(CODEX_BACKEND, command_overrides):
             detected.append(CODEX_BACKEND)
-        if shutil.which("claude"):
+        if command_for_backend(CLAUDE_CODE_BACKEND, command_overrides):
             detected.append(CLAUDE_CODE_BACKEND)
         return detected
 
     backends = []
     for backend in requested:
         if backend == "auto":
-            backends.extend(detect_agent_backends(["auto"]))
+            backends.extend(detect_agent_backends(["auto"], command_overrides))
         elif backend not in backends:
             backends.append(backend)
     return backends or [SIMULATED_BACKEND]
 
 
-def backend_availability(backends: list[str]) -> list[BackendAvailability]:
-    return [BackendAvailability(name=backend, available=_is_available(backend), command=_command(backend)) for backend in backends]
+def backend_availability(
+    backends: list[str],
+    command_overrides: dict[str, str] | None = None,
+) -> list[BackendAvailability]:
+    return [
+        BackendAvailability(
+            name=backend,
+            available=_is_available(backend, command_overrides),
+            command=command_for_backend(backend, command_overrides),
+        )
+        for backend in backends
+    ]
 
 
-def run_task(task: DelegatedTask, dry_run: bool = True) -> str:
+def run_task(
+    task: DelegatedTask,
+    dry_run: bool = True,
+    command_overrides: dict[str, str] | None = None,
+) -> str:
     if dry_run or task.preferred_backend == SIMULATED_BACKEND:
         return (
             f"{task.preferred_backend} worker completed a preview pass for `{task.role}`.\n\n"
@@ -53,7 +68,7 @@ def run_task(task: DelegatedTask, dry_run: bool = True) -> str:
             "`WORKER_DRY_RUN=false` for worker-only processes."
         )
 
-    command = _command(task.preferred_backend)
+    command = command_for_backend(task.preferred_backend, command_overrides)
     if command is None:
         return (
             f"Backend `{task.preferred_backend}` is not executable on this machine.\n\n"
@@ -81,13 +96,22 @@ def run_task(task: DelegatedTask, dry_run: bool = True) -> str:
     return output or f"`{task.preferred_backend}` exited with code {result.returncode}."
 
 
-def _is_available(backend: str) -> bool:
-    return backend == SIMULATED_BACKEND or _command(backend) is not None
+def _is_available(backend: str, command_overrides: dict[str, str] | None = None) -> bool:
+    return backend == SIMULATED_BACKEND or command_for_backend(backend, command_overrides) is not None
 
 
-def _command(backend: str) -> str | None:
+def command_for_backend(backend: str, command_overrides: dict[str, str] | None = None) -> str | None:
+    override = (command_overrides or {}).get(backend, "").strip().strip('"').strip("'")
+    if override:
+        if _looks_like_path(override):
+            return override if Path(override).exists() else None
+        return shutil.which(override)
     if backend == CODEX_BACKEND:
         return shutil.which("codex")
     if backend == CLAUDE_CODE_BACKEND:
         return shutil.which("claude")
     return None
+
+
+def _looks_like_path(value: str) -> bool:
+    return any(marker in value for marker in ("\\", "/", ":"))

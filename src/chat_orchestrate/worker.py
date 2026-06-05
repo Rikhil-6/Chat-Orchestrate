@@ -21,7 +21,7 @@ def build_coordination(settings: Settings | None = None) -> CoordinationManager:
         settings.coordination_state_path,
         settings.machine_id,
         agent_roles,
-        detect_agent_backends(settings.configured_backends),
+        detect_agent_backends(settings.configured_backends, settings.command_overrides),
         settings.orchestrator_ttl_seconds,
         settings.cluster_id,
         settings.coordination_token,
@@ -72,7 +72,7 @@ async def run_worker(settings: Settings | None = None) -> None:
             task.preferred_backend,
         )
         try:
-            result = run_task(task, dry_run=settings.worker_dry_run)
+            result = run_task(task, dry_run=settings.worker_dry_run, command_overrides=settings.command_overrides)
         except Exception as exc:  # pragma: no cover - defensive worker boundary
             try:
                 coordination.complete_task(task.task_id, str(exc), status="failed")
