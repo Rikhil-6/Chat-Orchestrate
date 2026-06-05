@@ -46,6 +46,24 @@ def save_runtime_env(values: dict[str, str], path: Path = RUNTIME_CONFIG_PATH) -
     path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
 
-def apply_runtime_env(environ: Any, path: Path = RUNTIME_CONFIG_PATH) -> None:
+def clear_runtime_env(path: Path = RUNTIME_CONFIG_PATH) -> None:
+    if path.exists():
+        path.unlink()
+
+
+def clear_runtime_process_env(environ: Any) -> None:
+    for key in ALLOWED_KEYS:
+        environ.pop(key, None)
+
+
+def apply_runtime_env(
+    environ: Any,
+    path: Path = RUNTIME_CONFIG_PATH,
+    *,
+    override: bool = False,
+) -> None:
     for key, value in load_runtime_env(path).items():
-        environ.setdefault(key, value)
+        if override:
+            environ[key] = value
+        else:
+            environ.setdefault(key, value)

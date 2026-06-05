@@ -34,6 +34,8 @@ Use `/connect-coordinator` or the **Connect to Coordinator** button to paste the
 
 If the preferred coordinator port is busy, the host flow tries the next available ports and prints the actual port in the connection pack. The app does not change OS firewall rules by itself; if `/health` is unreachable from another machine, allow inbound TCP for that port or use a VPN/tunnel URL.
 
+Use **End Session** or `/end-session` to stop any coordinator hosted by the current UI and wipe saved coordinator URLs/tokens from local runtime config.
+
 ## Election
 
 On startup, each app sends a heartbeat. If no live orchestrator exists, the app elects the first online machine by machine ID. An explicit `/claim-orchestrator` overrides automatic election while that machine keeps heartbeating.

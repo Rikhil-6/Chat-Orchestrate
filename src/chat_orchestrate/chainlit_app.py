@@ -19,7 +19,7 @@ from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import OrchestrationRun
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
-from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, save_runtime_env
+from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
 from chat_orchestrate.swarm_client import build_swarm_client
 
 settings = get_settings()
@@ -89,7 +89,7 @@ async def on_chat_start() -> None:
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
             "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
-            "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`."
+            "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`, `/end-session`."
         )
     ).send()
     await update_cluster_roster()
@@ -191,6 +191,8 @@ async def handle_command(text: str) -> None:
             await configure_http_connection()
         elif command == "/connect-file":
             await configure_file_connection()
+        elif command == "/end-session":
+            await end_session()
         else:
             await cl.Message(content=command_help()).send()
     except ProjectSpaceError as exc:
@@ -336,7 +338,7 @@ async def host_coordinator() -> None:
     await cl.Message(content="Starting a coordinator on this machine...").send()
     default_cluster = settings.cluster_id if settings.cluster_id != "local" else "friends-project"
     cluster_id = default_cluster
-    token = settings.coordination_token or secrets.token_urlsafe(24)
+    token = secrets.token_urlsafe(24)
     port = find_available_port(settings.coordinator_port)
     if port != settings.coordinator_port:
         await cl.Message(
@@ -411,6 +413,24 @@ async def configure_file_connection() -> None:
         }
     )
     await cl.Message(content=restart_required_message("Local file coordination settings saved.")).send()
+
+
+async def end_session() -> None:
+    global hosted_connection
+    stop_hosted_coordinator()
+    hosted_connection = {}
+    clear_runtime_env()
+    apply_local_file_connection()
+    await cl.Message(
+        content=(
+            "## Session Ended\n\n"
+            "Stopped any coordinator hosted by this UI and wiped local runtime connection config.\n\n"
+            f"Removed: `{RUNTIME_CONFIG_PATH}`\n\n"
+            "This UI is back on local file coordination. Other machines should also use **End Session** "
+            "if they were connected with the old token."
+        )
+    ).send()
+    await update_cluster_roster()
 
 
 async def ask_text(prompt: str, default: str = "") -> str | None:
@@ -493,6 +513,11 @@ async def configure_file_action(_: cl.Action) -> None:
     await configure_file_connection()
 
 
+@cl.action_callback("end_session")
+async def end_session_action(_: cl.Action) -> None:
+    await end_session()
+
+
 def machine_actions() -> list[cl.Action]:
     return [
         cl.Action(
@@ -556,6 +581,13 @@ def machine_actions() -> list[cl.Action]:
             label="Use Local File",
             tooltip="Switch this machine back to local file coordination.",
             icon="file-json",
+            payload={},
+        ),
+        cl.Action(
+            name="end_session",
+            label="End Session",
+            tooltip="Stop hosted coordinator and wipe saved coordinator URL/token.",
+            icon="log-out",
             payload={},
         ),
     ]
@@ -689,7 +721,8 @@ def command_help() -> str:
         "- `/host-coordinator`\n"
         "- `/connect-coordinator`\n"
         "- `/connect-http`\n"
-        "- `/connect-file`"
+        "- `/connect-file`\n"
+        "- `/end-session`"
     )
 
 
@@ -862,6 +895,8 @@ async def start_hosted_coordinator(
     if coordinator_process and coordinator_process.poll() is None:
         return True
     state_path = hosted_state_path(cluster_id)
+    if state_path.exists():
+        state_path.unlink()
     coordinator_process = subprocess.Popen(
         [
             sys.executable,
@@ -1043,6 +1078,21 @@ def apply_http_connection(
     coordination.cluster_id = cluster_id
     coordination.coordination_token = token
     coordination.token_hash = coordination._hash_token(token)
+
+
+def apply_local_file_connection() -> None:
+    settings.coordination_backend = "file"
+    settings.coordination_http_url = ""
+    settings.coordination_http_urls = ""
+    settings.coordination_token = ""
+    settings.cluster_id = "local"
+    settings.coordinator_auto_host = False
+    coordination.backend = "file"
+    coordination.http_urls = []
+    coordination.http_url = ""
+    coordination.cluster_id = "local"
+    coordination.coordination_token = ""
+    coordination.token_hash = ""
 
 
 def is_yes(text: str) -> bool:

@@ -298,7 +298,14 @@ class CoordinationManager:
                         json=state,
                         timeout=8,
                     )
+                if response.status_code in {401, 403}:
+                    raise CoordinationError(
+                        f"Coordinator authentication failed at `{url}`. "
+                        "Use Connect to Coordinator again or End Session to clear stale tokens."
+                    )
                 response.raise_for_status()
+            except CoordinationError:
+                raise
             except (httpx.HTTPError, httpx.TimeoutException) as exc:
                 last_error = exc
                 continue

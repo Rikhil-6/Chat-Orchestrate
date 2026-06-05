@@ -130,6 +130,8 @@ When auto-host fallback is enabled, a machine that cannot reach any saved coordi
 
 If `8765` is already busy, **Host Coordinator** picks the next available port and prints that port in the connection pack. If other machines still cannot open `/health`, allow inbound TCP for that port in the host OS firewall or use a VPN/tunnel URL.
 
+Use **End Session** or `/end-session` to stop any coordinator hosted by this UI and wipe saved coordinator URLs/tokens from `runtime_config.json`.
+
 ## Worker Launch
 
 Run UI plus one local worker:
