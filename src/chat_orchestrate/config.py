@@ -18,8 +18,12 @@ class Settings(BaseSettings):
     workspaces_root: Path = Path("./workspaces")
     workspace_state_path: Path = Path("./workspace_state.json")
     coordination_state_path: Path = Path("./coordination_state.json")
+    coordination_backend: str = "file"
+    coordination_http_url: str = ""
     cluster_id: str = "local"
     coordination_token: str = ""
+    coordinator_host: str = "127.0.0.1"
+    coordinator_port: int = 8765
     machine_id: str = ""
     agent_backends: str = "auto"
     orchestrator_ttl_seconds: int = 120

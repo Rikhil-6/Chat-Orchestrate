@@ -17,12 +17,18 @@ The app is designed for multiple browser clients to connect to the same deployme
 
 ## Quickstart
 
+Windows PowerShell:
+
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-copy .env.example .env
-python scripts/run_local.py
+.\scripts\setup.ps1
+.\scripts\run_local.ps1
+```
+
+macOS/Linux:
+
+```sh
+./scripts/setup.sh
+./scripts/run_local.sh
 ```
 
 By default the app runs with a deterministic local fallback client so you can test the UI without model keys. To connect OpenSwarm, set:
@@ -72,15 +78,31 @@ Use **worktree mode** when agents are working on the same project with separate 
 
 Each running app instance registers a `MACHINE_ID`, capabilities, and agent backends in `COORDINATION_STATE_PATH`. If no live orchestrator is claimed, the app elects one from the online machines. The orchestrator machine is shown in the Chainlit startup message and every run summary.
 
-For multiple machines, point every deployment at the same shared state location:
+For machines on the same LAN, shared drive, VPN filesystem, or mounted network folder, use the default file backend and point every deployment at the same state location:
 
 ```env
+COORDINATION_BACKEND=file
 MACHINE_ID=machine-a
 AGENT_BACKENDS=codex,claude-code,simulated
 CLUSTER_ID=friends-project
 COORDINATION_TOKEN=share-this-out-of-band
 COORDINATION_STATE_PATH=\\shared\chat-orchestrate\coordination_state.json
 WORKSPACE_STATE_PATH=\\shared\chat-orchestrate\workspace_state.json
+```
+
+For machines on mobile data or different networks, run one HTTP coordinator that everyone can reach through a VPN, tunnel, VPS, or other private URL:
+
+```powershell
+.\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"
+```
+
+Every UI or worker then uses:
+
+```env
+COORDINATION_BACKEND=http
+COORDINATION_HTTP_URL=https://your-coordinator-url.example
+CLUSTER_ID=friends-project
+COORDINATION_TOKEN=share-this-out-of-band
 ```
 
 The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`.
@@ -92,23 +114,30 @@ Chainlit also shows a **Machine Status** panel on startup with native buttons to
 Run UI plus one local worker:
 
 ```powershell
-python scripts/run_local.py --machine-id machine-a --backends codex,claude-code,simulated
+.\scripts\run_local.ps1 -MachineId machine-a -Backends codex,claude-code,simulated
 ```
 
 Run worker-only processes on additional machines:
 
 ```powershell
-python scripts/run_worker.py --machine-id machine-b --backends codex
-python scripts/run_worker.py --machine-id machine-c --backends claude-code
+.\scripts\run_worker.ps1 -MachineId machine-b -Backends codex
+.\scripts\run_worker.ps1 -MachineId machine-c -Backends claude-code
 ```
 
 Workers dry-run by default. Set `WORKER_DRY_RUN=false` only when you intentionally want a worker to call local agent CLIs.
+
+On macOS/Linux, use the `.sh` versions with the Python-style flags:
+
+```sh
+./scripts/run_local.sh --machine-id machine-a --backends codex,claude-code,simulated
+./scripts/run_worker.sh --machine-id machine-b --backends codex
+```
 
 ## Fresh GitHub Clone
 
 Runtime files are ignored: `.env`, `coordination_state.json`, `workspace_state.json`, and `workspaces/`. A new clone starts clean.
 
-For a shared swarm, give friends the same `CLUSTER_ID`, `COORDINATION_TOKEN`, and shared state location out of band. Do not commit those values.
+For a shared swarm, give friends the same `CLUSTER_ID`, `COORDINATION_TOKEN`, and either the shared state location or HTTP coordinator URL out of band. Do not commit those values.
 
 ## OpenSwarm Notes
 
@@ -131,6 +160,11 @@ scripts/
   run_local.py
   run_worker.py
   run_chainlit.py
+  run_coordinator.py
+  setup.ps1 / setup.sh
+  run_local.ps1 / run_local.sh
+  run_worker.ps1 / run_worker.sh
+  run_coordinator.ps1 / run_coordinator.sh
 docs/
   ARCHITECTURE.md
   DEPLOYMENT.md

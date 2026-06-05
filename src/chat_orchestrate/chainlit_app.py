@@ -23,6 +23,8 @@ coordination = CoordinationManager(
     settings.orchestrator_ttl_seconds,
     settings.cluster_id,
     settings.coordination_token,
+    settings.coordination_backend,
+    settings.coordination_http_url,
 )
 orchestrator = Orchestrator(build_swarm_client(settings), settings.default_agents, coordination)
 
@@ -50,6 +52,7 @@ async def on_chat_start() -> None:
             f"Machine: `{local_node.machine_id}` as `{local_node.role}`\n"
             f"Orchestrator: `{orchestrator_node.machine_id}`\n\n"
             f"Cluster: `{settings.cluster_id}`\n"
+            f"Coordination: `{settings.coordination_backend}`\n"
             f"Backends: `{', '.join(agent_backends)}`\n\n"
             "Commands: `/spaces`, `/use <name>`, `/create-space <name> <path>`, "
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "

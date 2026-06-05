@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
+
 from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND
 from .models import DelegatedTask, MachineNode, ProjectSpace
 
@@ -28,16 +30,24 @@ class CoordinationManager:
         orchestrator_ttl_seconds: int = 120,
         cluster_id: str = "local",
         coordination_token: str = "",
+        backend: str = "file",
+        http_url: str = "",
     ) -> None:
         self.state_path = state_path.resolve()
+        self.backend = backend.lower().strip() or "file"
+        self.http_url = http_url.rstrip("/")
         self.cluster_id = cluster_id.strip() or "local"
+        self.coordination_token = coordination_token.strip()
         self.token_hash = self._hash_token(coordination_token)
         self.machine_id = machine_id.strip() or socket.gethostname().lower()
         self.hostname = socket.gethostname()
         self.agent_roles = agent_roles
         self.agent_backends = agent_backends or [SIMULATED_BACKEND]
         self.orchestrator_ttl = timedelta(seconds=orchestrator_ttl_seconds)
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.backend == "file":
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        elif self.backend == "http" and not self.http_url:
+            raise CoordinationError("COORDINATION_HTTP_URL is required when COORDINATION_BACKEND=http.")
 
     def heartbeat(self) -> MachineNode:
         state = self._load()
@@ -228,6 +238,13 @@ class CoordinationManager:
         return sorted(online, key=lambda machine: machine.machine_id)
 
     def _load(self) -> dict:
+        if self.backend == "http":
+            state = self._http_load()
+            self._assert_cluster_access(state)
+            state.setdefault("machines", {})
+            state.setdefault("tasks", [])
+            return state
+
         if not self.state_path.exists():
             return {
                 "cluster_id": self.cluster_id,
@@ -247,7 +264,36 @@ class CoordinationManager:
 
     def _save(self, state: dict) -> None:
         self._assert_cluster_access(state)
+        if self.backend == "http":
+            self._http_save(state)
+            return
         self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _http_load(self) -> dict:
+        response = httpx.get(
+            f"{self.http_url}/state",
+            headers=self._http_headers(),
+            params={"cluster_id": self.cluster_id},
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _http_save(self, state: dict) -> None:
+        response = httpx.put(
+            f"{self.http_url}/state",
+            headers=self._http_headers(),
+            params={"cluster_id": self.cluster_id},
+            json=state,
+            timeout=20,
+        )
+        response.raise_for_status()
+
+    def _http_headers(self) -> dict[str, str]:
+        headers = {}
+        if self.coordination_token:
+            headers["Authorization"] = f"Bearer {self.coordination_token}"
+        return headers
 
     def _assert_cluster_access(self, state: dict) -> None:
         state_cluster = state.get("cluster_id", self.cluster_id)

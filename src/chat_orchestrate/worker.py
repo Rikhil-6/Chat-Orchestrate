@@ -21,6 +21,8 @@ def build_coordination(settings: Settings | None = None) -> CoordinationManager:
         settings.orchestrator_ttl_seconds,
         settings.cluster_id,
         settings.coordination_token,
+        settings.coordination_backend,
+        settings.coordination_http_url,
     )
 
 
