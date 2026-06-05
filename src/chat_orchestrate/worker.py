@@ -15,10 +15,12 @@ LOGGER = logging.getLogger("chat_orchestrate.worker")
 
 def build_coordination(settings: Settings | None = None) -> CoordinationManager:
     settings = settings or get_settings()
+    agent_roles = [*settings.default_agents, "backend", "frontend"]
+    agent_roles = list(dict.fromkeys(agent_roles))
     return CoordinationManager(
         settings.coordination_state_path,
         settings.machine_id,
-        settings.default_agents,
+        agent_roles,
         detect_agent_backends(settings.configured_backends),
         settings.orchestrator_ttl_seconds,
         settings.cluster_id,

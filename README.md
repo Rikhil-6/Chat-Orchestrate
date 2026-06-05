@@ -52,7 +52,7 @@ Open Chainlit at [http://localhost:7860](http://localhost:7860).
 
 Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex` and `claude`; if neither is available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
 
-The Chainlit sidebar includes a **Local Agent** selector so you can explicitly choose `codex`, `claude-code`, or `auto` without editing `.env`. The app also keeps recent local chat records in ignored `ui_state.json`, so refreshing the page replays the last few messages. Use the sidebar toggle, **Clear History**, or `/clear-history` when you want a fresh local chat surface.
+The Chainlit sidebar includes a **Local Agent** selector so you can explicitly choose `codex`, `claude-code`, or `auto` without editing `.env`. The selected backend is advertised to the cluster, and chat turns use that local CLI when it is reachable from the terminal that launched Chainlit. The app also keeps recent local chat records in ignored `ui_state.json`, so refreshing the page replays the last few messages. Use the sidebar toggle, **Clear History**, or `/clear-history` when you want a fresh local chat surface.
 
 ## Project Spaces
 
@@ -117,7 +117,7 @@ CLUSTER_ID=friends-project
 COORDINATION_TOKEN=share-this-out-of-band
 ```
 
-The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`.
+The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`. When a goal mentions backend/frontend work, the planner can create specialist backend and frontend tasks. A connected Chainlit app also runs a lightweight local worker while it is open, so another machine can claim its assigned task and return the result through the coordinator.
 
 Chainlit also shows a compact **Cluster Roster** plus a **Machine Status** panel on startup. The roster is updated as you interact with the app and shows each connected machine, status, role, agent backends, and the currently selected local chat backend. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 
@@ -150,7 +150,7 @@ Run worker-only processes on additional machines:
 .\scripts\run_worker.ps1 -MachineId machine-c -Backends claude-code
 ```
 
-Workers dry-run by default. Set `WORKER_DRY_RUN=false` only when you intentionally want a worker to call local agent CLIs.
+Workers dry-run by default. Set `WORKER_DRY_RUN=false` only when you intentionally want a worker-only process to call local agent CLIs. Chainlit UI sessions use the sidebar **Local Agent** selection for their built-in lightweight worker.
 
 On macOS/Linux, use the `.sh` versions with the Python-style flags:
 

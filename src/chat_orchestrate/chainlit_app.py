@@ -14,7 +14,15 @@ import chainlit as cl
 import httpx
 from chainlit.input_widget import Select, Switch
 
-from chat_orchestrate.backends import backend_availability, detect_agent_backends
+from chat_orchestrate.backends import (
+    CLAUDE_CODE_BACKEND,
+    CODEX_BACKEND,
+    OPEN_SWARM_BACKEND,
+    SIMULATED_BACKEND,
+    backend_availability,
+    detect_agent_backends,
+    run_task,
+)
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import OrchestrationRun
@@ -32,11 +40,13 @@ from chat_orchestrate.ui_state import (
 
 settings = get_settings()
 agent_backends = detect_agent_backends(settings.configured_backends)
+agent_roles = [*settings.default_agents, "backend", "frontend"]
+agent_roles = list(dict.fromkeys(agent_roles))
 spaces = ProjectSpaceManager(settings.workspaces_root, settings.workspace_state_path)
 coordination = CoordinationManager(
     settings.coordination_state_path,
     settings.machine_id,
-    settings.default_agents,
+    agent_roles,
     agent_backends,
     settings.orchestrator_ttl_seconds,
     settings.cluster_id,
@@ -47,6 +57,7 @@ coordination = CoordinationManager(
 )
 coordinator_process: subprocess.Popen | None = None
 hosted_connection: dict[str, str] = {}
+ui_worker_task: asyncio.Task | None = None
 
 
 def stop_hosted_coordinator() -> None:
@@ -56,7 +67,56 @@ def stop_hosted_coordinator() -> None:
     coordinator_process = None
 
 
+def stop_ui_worker() -> None:
+    global ui_worker_task
+    if ui_worker_task and not ui_worker_task.done():
+        ui_worker_task.cancel()
+    ui_worker_task = None
+
+
 atexit.register(stop_hosted_coordinator)
+atexit.register(stop_ui_worker)
+
+
+def start_ui_worker() -> None:
+    global ui_worker_task
+    if ui_worker_task and not ui_worker_task.done():
+        return
+    ui_worker_task = asyncio.create_task(ui_worker_loop())
+
+
+async def ui_worker_loop() -> None:
+    while True:
+        try:
+            node = coordination.heartbeat()
+            if node.role == "orchestrator":
+                await asyncio.sleep(settings.worker_poll_seconds)
+                continue
+            task = coordination.claim_next_task()
+        except CoordinationError:
+            await asyncio.sleep(settings.worker_poll_seconds)
+            continue
+
+        if task is None:
+            await asyncio.sleep(settings.worker_poll_seconds)
+            continue
+
+        try:
+            result = await asyncio.to_thread(
+                run_task,
+                task,
+                not settings.use_local_agent_chat,
+            )
+        except Exception as exc:  # pragma: no cover - defensive UI worker boundary
+            try:
+                coordination.complete_task(task.task_id, str(exc), status="failed")
+            except CoordinationError:
+                pass
+        else:
+            try:
+                coordination.complete_task(task.task_id, result)
+            except CoordinationError:
+                pass
 
 
 @cl.on_chat_start
@@ -85,6 +145,7 @@ async def on_chat_start() -> None:
         active = "`default`"
 
     await setup_chat_settings()
+    start_ui_worker()
     await restore_chat_history()
     await cl.Message(
         content=(
@@ -136,10 +197,12 @@ async def on_message(message: cl.Message) -> None:
     await status.send()
 
     selected_backend = cl.user_session.get("agent_backend") or "auto"
+    refresh_advertised_backends(selected_backend)
     turn_orchestrator = Orchestrator(
         build_swarm_client(settings, selected_backend),
         settings.default_agents,
         coordination,
+        settings.delegated_task_wait_seconds,
     )
     async for event in turn_orchestrator.run(text, project):
         if isinstance(event, OrchestrationRun):
@@ -160,6 +223,7 @@ async def on_settings_update(updated_settings: dict) -> None:
     restore_history = bool(updated_settings.get("restore_history", True))
     cl.user_session.set("agent_backend", backend)
     cl.user_session.set("restore_history", restore_history)
+    refresh_advertised_backends(backend)
     save_preferences(
         {
             "agent_backend": backend,
@@ -255,7 +319,14 @@ async def show_spaces() -> None:
 
 async def setup_chat_settings() -> None:
     preferences = load_preferences()
-    backend_values = ["auto", *agent_backends]
+    backend_values = [
+        "auto",
+        CODEX_BACKEND,
+        CLAUDE_CODE_BACKEND,
+        OPEN_SWARM_BACKEND,
+        SIMULATED_BACKEND,
+        *agent_backends,
+    ]
     unique_backend_values = []
     for backend in backend_values:
         if backend not in unique_backend_values:
@@ -266,6 +337,7 @@ async def setup_chat_settings() -> None:
     restore_history = preferences.get("restore_history", "true").lower() != "false"
     cl.user_session.set("agent_backend", selected_backend)
     cl.user_session.set("restore_history", restore_history)
+    refresh_advertised_backends(selected_backend)
     await cl.ChatSettings(
         [
             Select(
@@ -283,6 +355,19 @@ async def setup_chat_settings() -> None:
             ),
         ]
     ).send()
+
+
+def refresh_advertised_backends(selected_backend: str = "auto") -> None:
+    global agent_backends
+    detected = detect_agent_backends(settings.configured_backends)
+    advertised = []
+    for backend in [*detected, selected_backend]:
+        if backend and backend != "auto" and backend not in advertised:
+            advertised.append(backend)
+    if not advertised:
+        advertised = [SIMULATED_BACKEND]
+    agent_backends = advertised
+    coordination.agent_backends = advertised
 
 
 async def restore_chat_history() -> None:
@@ -808,13 +893,14 @@ def selected_chat_backend() -> str:
 
 def _format_machine_card(machine, orchestrator_id: str) -> str:
     age = datetime.now(UTC) - machine.last_seen
+    seen_seconds = max(0, int(age.total_seconds()))
     status = _machine_status(machine)
     lead = "orchestrator" if machine.machine_id == orchestrator_id else machine.role
     capabilities = " ".join(f"`{capability}`" for capability in machine.capabilities)
     backends = " ".join(f"`{backend}`" for backend in machine.agent_backends)
     return (
         f"> ### {machine.machine_id}\n"
-        f"> `{status}` `{lead}` `seen {int(age.total_seconds())}s ago`  \n"
+        f"> `{status}` `{lead}` `seen {seen_seconds}s ago`  \n"
         f"> Host: `{machine.hostname}`  \n"
         f"> Backends: {backends}  \n"
         f"> Capabilities: {capabilities}\n"

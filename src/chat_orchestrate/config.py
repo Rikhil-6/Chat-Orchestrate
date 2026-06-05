@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     worker_dry_run: bool = True
     use_local_agent_chat: bool = True
     local_agent_timeout_seconds: int = 180
+    delegated_task_wait_seconds: float = 90.0
     default_agent_set: str = "coordinator,researcher,engineer,reviewer,documenter"
 
     @property

@@ -118,7 +118,7 @@ class CoordinationManager:
 
         tasks = []
         for role in self._roles_for_goal(goal):
-            machine = self._best_machine_for_role(machines, role)
+            machine = self._best_machine_for_role(machines, role, goal)
             preferred_backend = self._preferred_backend_for_role(machine, role, goal)
             tasks.append(
                 DelegatedTask(
@@ -145,6 +145,13 @@ class CoordinationManager:
         state = self._load()
         tasks = [self._task_from_json(item) for item in state["tasks"]]
         return sorted(tasks, key=lambda task: task.created_at, reverse=True)[:limit]
+
+    def get_task(self, task_id: str) -> DelegatedTask | None:
+        state = self._load()
+        for item in state["tasks"]:
+            if item["task_id"] == task_id:
+                return self._task_from_json(item)
+        return None
 
     def claim_next_task(self) -> DelegatedTask | None:
         state = self._load()
@@ -176,6 +183,10 @@ class CoordinationManager:
     def _roles_for_goal(self, goal: str) -> list[str]:
         lowered = goal.lower()
         roles = ["coordinator"]
+        if any(word in lowered for word in ["backend", "back-end", "api", "server"]):
+            roles.append("backend")
+        if any(word in lowered for word in ["frontend", "front-end", "ui", "website"]):
+            roles.append("frontend")
         if any(word in lowered for word in ["research", "discover", "compare", "investigate"]):
             roles.append("researcher")
         if any(word in lowered for word in ["build", "code", "implement", "fix", "add", "launch"]):
@@ -190,7 +201,10 @@ class CoordinationManager:
                 roles.append(fallback)
         return roles
 
-    def _best_machine_for_role(self, machines: list[MachineNode], role: str) -> MachineNode:
+    def _best_machine_for_role(self, machines: list[MachineNode], role: str, goal: str = "") -> MachineNode:
+        hinted = self._hinted_machine_for_role(machines, role, goal)
+        if hinted is not None:
+            return hinted
         capable = [machine for machine in machines if role in machine.capabilities]
         pool = capable or machines
         backend_capable = [machine for machine in pool if self._preferred_backend_for_role(machine, role, "")]
@@ -200,9 +214,22 @@ class CoordinationManager:
         index = sum(ord(char) for char in role) % len(pool)
         return pool[index]
 
+    def _hinted_machine_for_role(self, machines: list[MachineNode], role: str, goal: str) -> MachineNode | None:
+        lowered = goal.lower()
+        if role in {"backend", "engineer"} and "this machine" in lowered:
+            for machine in machines:
+                if machine.machine_id == self.machine_id:
+                    return machine
+        if role == "frontend":
+            for machine in machines:
+                identifiers = [machine.machine_id.lower(), machine.hostname.lower()]
+                if machine.machine_id != self.machine_id and any(identifier in lowered for identifier in identifiers):
+                    return machine
+        return None
+
     def _preferred_backend_for_role(self, machine: MachineNode, role: str, goal: str) -> str:
         lowered = goal.lower()
-        if role == "engineer" and CODEX_BACKEND in machine.agent_backends:
+        if role in {"engineer", "backend", "frontend"} and CODEX_BACKEND in machine.agent_backends:
             return CODEX_BACKEND
         if role in {"coordinator", "researcher"} and CLAUDE_CODE_BACKEND in machine.agent_backends:
             return CLAUDE_CODE_BACKEND

@@ -53,6 +53,40 @@ def test_delegation_assigns_tasks_to_registered_machines(tmp_path: Path) -> None
     assert any(task.preferred_backend == "codex" for task in tasks)
 
 
+def test_delegation_honors_backend_frontend_machine_hints(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    host = CoordinationManager(
+        state,
+        "sg-akc-dt330",
+        ["coordinator", "backend", "frontend"],
+        ["codex"],
+        cluster_id="test",
+        coordination_token="secret",
+    )
+    remote = CoordinationManager(
+        state,
+        "desktop-p4k08ab",
+        ["coordinator", "backend", "frontend"],
+        ["claude-code"],
+        cluster_id="test",
+        coordination_token="secret",
+    )
+    host.claim_orchestrator()
+    remote.heartbeat()
+
+    tasks = host.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "have this machine work on a backend and delegate the frontend building to desktop-p4k08ab",
+    )
+    by_role = {task.role: task for task in tasks}
+
+    assert by_role["backend"].assigned_machine == "sg-akc-dt330"
+    assert by_role["backend"].preferred_backend == "codex"
+    assert by_role["frontend"].assigned_machine == "desktop-p4k08ab"
+    assert by_role["frontend"].preferred_backend == "claude-code"
+
+
 def test_worker_claims_and_completes_matching_backend_task(tmp_path: Path) -> None:
     state = tmp_path / "coordination.json"
     manager = CoordinationManager(state, "machine-a", ["engineer"], ["codex"])

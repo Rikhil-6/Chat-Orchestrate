@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from .coordination import CoordinationManager
-from .models import AgentSpec, AgentTurn, OrchestrationRun, ProjectSpace
+from .models import AgentSpec, AgentTurn, DelegatedTask, OrchestrationRun, ProjectSpace
 from .swarm_client import SwarmClient
 
 
@@ -22,6 +23,16 @@ AGENT_LIBRARY: dict[str, AgentSpec] = {
         name="Engineer",
         role="implementation specialist",
         instructions="Propose concrete implementation steps and code-level changes.",
+    ),
+    "backend": AgentSpec(
+        name="Backend",
+        role="backend builder",
+        instructions="Build or specify server routes, data models, APIs, persistence, auth, and integration points.",
+    ),
+    "frontend": AgentSpec(
+        name="Frontend",
+        role="frontend builder",
+        instructions="Build or specify UI screens, interactions, styling, state management, and browser verification.",
     ),
     "reviewer": AgentSpec(
         name="Reviewer",
@@ -42,10 +53,12 @@ class Orchestrator:
         client: SwarmClient,
         agent_names: list[str],
         coordination: CoordinationManager | None = None,
+        delegated_task_wait_seconds: float = 30.0,
     ) -> None:
         self.client = client
         self.agents = [AGENT_LIBRARY[name] for name in agent_names if name in AGENT_LIBRARY]
         self.coordination = coordination
+        self.delegated_task_wait_seconds = delegated_task_wait_seconds
         if not self.agents:
             self.agents = list(AGENT_LIBRARY.values())
 
@@ -57,13 +70,15 @@ class Orchestrator:
             orchestrator_node = self.coordination.get_or_elect_orchestrator()
             run.orchestrator_machine = orchestrator_node.machine_id
             run.delegated_tasks = self.coordination.plan_delegation(run.run_id, project, goal)
+            self._add_delegated_agents(run)
             delegation_context = self._delegation_context(run)
 
         context = ""
 
         for agent in self.agents:
             agent_context = f"{delegation_context}\n\n{context}".strip()
-            output = await self.client.run_agent(agent, project, goal, agent_context)
+            task = self._task_for_role(run, self._agent_key(agent))
+            output = await self._run_or_wait_for_agent(agent, project, goal, agent_context, task)
             turn = AgentTurn(
                 agent=agent.name,
                 role=agent.role,
@@ -81,6 +96,48 @@ class Orchestrator:
     def _append_context(self, context: str, turn: AgentTurn) -> str:
         block = f"## {turn.agent} ({turn.role})\n{turn.content}"
         return f"{context}\n\n{block}".strip()
+
+    async def _run_or_wait_for_agent(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+        task: DelegatedTask | None,
+    ) -> str:
+        if task is None or self.coordination is None:
+            return await self.client.run_agent(agent, project, goal, context)
+        if task.assigned_machine == self.coordination.machine_id:
+            return await self.client.run_agent(agent, project, goal, context)
+
+        completed = await self._wait_for_delegated_task(task)
+        if completed and completed.result:
+            return f"`{completed.preferred_backend}` result from `{completed.assigned_machine}`\n\n{completed.result}"
+        return (
+            f"Delegated `{agent.name}` to `{task.assigned_machine}` via `{task.preferred_backend}`, "
+            "but no completed result came back before the local wait window ended. Make sure that "
+            "machine is connected and has its UI or worker running with real local-agent execution enabled."
+        )
+
+    async def _wait_for_delegated_task(self, task: DelegatedTask) -> DelegatedTask | None:
+        if self.coordination is None or self.delegated_task_wait_seconds <= 0:
+            return None
+        deadline = asyncio.get_running_loop().time() + self.delegated_task_wait_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            current = await asyncio.to_thread(self.coordination.get_task, task.task_id)
+            if current and current.status in {"completed", "failed"}:
+                return current
+            await asyncio.sleep(1)
+        return await asyncio.to_thread(self.coordination.get_task, task.task_id)
+
+    def _add_delegated_agents(self, run: OrchestrationRun) -> None:
+        existing = {self._agent_key(agent) for agent in self.agents}
+        additions = []
+        for task in run.delegated_tasks:
+            if task.role in AGENT_LIBRARY and task.role not in existing:
+                additions.append(AGENT_LIBRARY[task.role])
+                existing.add(task.role)
+        self.agents = [*self.agents, *additions]
 
     def _summarize(self, run: OrchestrationRun) -> str:
         handoffs = "\n".join(
@@ -141,6 +198,12 @@ class Orchestrator:
         for task in run.delegated_tasks:
             if task.role == role:
                 return task.preferred_backend
+        return None
+
+    def _task_for_role(self, run: OrchestrationRun, role: str) -> DelegatedTask | None:
+        for task in run.delegated_tasks:
+            if task.role == role:
+                return task
         return None
 
     def _agent_key(self, agent: AgentSpec) -> str:

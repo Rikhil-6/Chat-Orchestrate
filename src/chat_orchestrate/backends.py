@@ -46,23 +46,37 @@ def backend_availability(backends: list[str]) -> list[BackendAvailability]:
 def run_task(task: DelegatedTask, dry_run: bool = True) -> str:
     if dry_run or task.preferred_backend == SIMULATED_BACKEND:
         return (
-            f"{task.preferred_backend} worker completed a dry-run for `{task.role}`.\n\n"
+            f"{task.preferred_backend} worker completed a preview pass for `{task.role}`.\n\n"
             f"Task: {task.title}\n"
-            f"Goal: {task.goal}"
+            f"Goal: {task.goal}\n\n"
+            "To use a real local agent, select `codex` or `claude-code` in the UI sidebar and make sure "
+            "`WORKER_DRY_RUN=false` for worker-only processes."
         )
 
     command = _command(task.preferred_backend)
     if command is None:
-        return f"Backend `{task.preferred_backend}` is not executable on this machine."
+        return (
+            f"Backend `{task.preferred_backend}` is not executable on this machine.\n\n"
+            "Restart the app from a terminal where the matching CLI is on PATH, or select another Local Agent."
+        )
+
+    prompt = (
+        f"You are the `{task.role}` agent for a distributed project run.\n\n"
+        f"Task: {task.title}\n"
+        f"Project space: {task.project}\n"
+        f"Goal:\n{task.goal}\n\n"
+        "Return a concrete, useful result for your assigned role. If this is implementation work, describe "
+        "the exact files, commands, or code changes you would make or have made."
+    )
 
     if task.preferred_backend == CODEX_BACKEND:
-        args = [command, "exec", "--skip-git-repo-check", task.goal]
+        args = [command, "exec", "--skip-git-repo-check", prompt]
     elif task.preferred_backend == CLAUDE_CODE_BACKEND:
-        args = [command, "-p", task.goal]
+        args = [command, "-p", prompt]
     else:
         return f"Backend `{task.preferred_backend}` has no command runner yet."
 
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
+    result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180)
     output = result.stdout.strip() or result.stderr.strip()
     return output or f"`{task.preferred_backend}` exited with code {result.returncode}."
 

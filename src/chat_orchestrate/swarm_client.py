@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 
 import httpx
 
@@ -82,6 +83,9 @@ class LocalAgentCliClient(SwarmClient):
         prompt = (
             f"You are {agent.name}, acting as {agent.role}.\n"
             f"{agent.instructions}\n\n"
+            "Be concrete, linguistic, and useful. If the user asks for implementation, propose or perform "
+            "specific work inside the project space. If distributed coordination context assigns work to "
+            "another machine, respect that assignment and focus on your own role.\n\n"
             f"Project space: {project.name}\n"
             f"Path: {project.path}\n"
             f"Branch: {project.branch or 'unknown'}\n\n"
@@ -92,18 +96,27 @@ class LocalAgentCliClient(SwarmClient):
             output = await self._run_backend(backend, prompt)
             if output:
                 return f"`{backend}` local response\n\n{output}"
+            if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
+                return (
+                    f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
+                    f"Expected command: `{self._command_for_backend(backend) or backend}`\n\n"
+                    "Install it or restart Chainlit from a terminal where that command is on `PATH`."
+                )
         return await self.preview.run_agent(agent, project, goal, context)
 
     def _ordered_backends(self) -> list[str]:
-        if self.preferred_backend != "auto" and self.preferred_backend in self.backends:
+        if self.preferred_backend != "auto":
             return [self.preferred_backend, *[backend for backend in self.backends if backend != self.preferred_backend]]
         return self.backends
 
     async def _run_backend(self, backend: str, prompt: str) -> str:
+        command = self._command_for_backend(backend)
+        if command is None:
+            return ""
         if backend == CODEX_BACKEND:
-            args = ["codex", "exec", "--skip-git-repo-check", prompt]
+            args = [command, "exec", "--skip-git-repo-check", prompt]
         elif backend == CLAUDE_CODE_BACKEND:
-            args = ["claude", "-p", prompt]
+            args = [command, "-p", prompt]
         else:
             return ""
 
@@ -122,6 +135,13 @@ class LocalAgentCliClient(SwarmClient):
 
         output = stdout.decode(errors="replace").strip() or stderr.decode(errors="replace").strip()
         return output
+
+    def _command_for_backend(self, backend: str) -> str | None:
+        if backend == CODEX_BACKEND:
+            return shutil.which("codex")
+        if backend == CLAUDE_CODE_BACKEND:
+            return shutil.which("claude")
+        return None
 
 
 def build_swarm_client(settings: Settings, preferred_backend: str = "auto") -> SwarmClient:
