@@ -11,6 +11,7 @@ from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import OrchestrationRun
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
+from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, save_runtime_env
 from chat_orchestrate.swarm_client import build_swarm_client
 
 settings = get_settings()
@@ -58,7 +59,8 @@ async def on_chat_start() -> None:
             "Commands: `/spaces`, `/use <name>`, `/create-space <name> <path>`, "
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
-            "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, `/connect`."
+            "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
+            "`/connect`, `/connect-http`, `/connect-file`."
         )
     ).send()
     await show_machines()
@@ -150,6 +152,10 @@ async def handle_command(text: str) -> None:
             await show_backends()
         elif command == "/connect":
             await show_connection()
+        elif command == "/connect-http":
+            await configure_http_connection()
+        elif command == "/connect-file":
+            await configure_file_connection()
         else:
             await cl.Message(content=command_help()).send()
     except ProjectSpaceError as exc:
@@ -206,6 +212,77 @@ async def show_connection() -> None:
     await cl.Message(content=connection_cards(), actions=machine_actions()).send()
 
 
+async def configure_http_connection() -> None:
+    coordinator_url = await ask_text(
+        "Coordinator URL, e.g. `http://192.168.1.25:8765` or an HTTPS tunnel URL."
+    )
+    if coordinator_url is None:
+        return
+    cluster_id = await ask_text("Cluster ID.", settings.cluster_id)
+    if cluster_id is None:
+        return
+    token = await ask_text("Shared coordination token.", settings.coordination_token)
+    if token is None:
+        return
+    machine_id = await ask_text("This machine ID.", settings.machine_id or socket.gethostname().lower())
+    if machine_id is None:
+        return
+    backends = await ask_text("Agent backends for this machine.", ",".join(agent_backends))
+    if backends is None:
+        return
+
+    save_runtime_env(
+        {
+            "COORDINATION_BACKEND": "http",
+            "COORDINATION_HTTP_URL": coordinator_url,
+            "CLUSTER_ID": cluster_id,
+            "COORDINATION_TOKEN": token,
+            "MACHINE_ID": machine_id,
+            "AGENT_BACKENDS": backends,
+        }
+    )
+    await cl.Message(content=restart_required_message("HTTP coordinator settings saved.")).send()
+
+
+async def configure_file_connection() -> None:
+    cluster_id = await ask_text("Cluster ID.", settings.cluster_id)
+    if cluster_id is None:
+        return
+    token = await ask_text("Shared coordination token.", settings.coordination_token)
+    if token is None:
+        return
+    machine_id = await ask_text("This machine ID.", settings.machine_id or socket.gethostname().lower())
+    if machine_id is None:
+        return
+    backends = await ask_text("Agent backends for this machine.", ",".join(agent_backends))
+    if backends is None:
+        return
+
+    save_runtime_env(
+        {
+            "COORDINATION_BACKEND": "file",
+            "COORDINATION_HTTP_URL": "",
+            "CLUSTER_ID": cluster_id,
+            "COORDINATION_TOKEN": token,
+            "MACHINE_ID": machine_id,
+            "AGENT_BACKENDS": backends,
+        }
+    )
+    await cl.Message(content=restart_required_message("Local file coordination settings saved.")).send()
+
+
+async def ask_text(prompt: str, default: str = "") -> str | None:
+    suffix = f"\n\nCurrent/default: `{default}`" if default else ""
+    response = await cl.AskUserMessage(content=prompt + suffix, timeout=180).send()
+    if response is None:
+        await cl.Message(content="Configuration cancelled.").send()
+        return None
+    value = str(response.get("output", "")).strip()
+    if value:
+        return value
+    return default.strip()
+
+
 async def show_workspace_modes() -> None:
     await cl.Message(
         content=(
@@ -258,6 +335,16 @@ async def show_connection_action(_: cl.Action) -> None:
     await show_connection()
 
 
+@cl.action_callback("configure_http")
+async def configure_http_action(_: cl.Action) -> None:
+    await configure_http_connection()
+
+
+@cl.action_callback("configure_file")
+async def configure_file_action(_: cl.Action) -> None:
+    await configure_file_connection()
+
+
 def machine_actions() -> list[cl.Action]:
     return [
         cl.Action(
@@ -300,6 +387,20 @@ def machine_actions() -> list[cl.Action]:
             label="Connection",
             tooltip="Show how this machine can join or host a shared cluster.",
             icon="network",
+            payload={},
+        ),
+        cl.Action(
+            name="configure_http",
+            label="Configure HTTP",
+            tooltip="Save coordinator URL and cluster settings through the UI.",
+            icon="plug",
+            payload={},
+        ),
+        cl.Action(
+            name="configure_file",
+            label="Use Local File",
+            tooltip="Switch this machine back to local file coordination.",
+            icon="file-json",
             payload={},
         ),
     ]
@@ -352,7 +453,9 @@ def command_help() -> str:
         "- `/release-orchestrator`\n"
         "- `/tasks`\n"
         "- `/backends`\n"
-        "- `/connect`"
+        "- `/connect`\n"
+        "- `/connect-http`\n"
+        "- `/connect-file`"
     )
 
 
@@ -377,7 +480,8 @@ def connection_cards() -> str:
             f"> Backend: `{backend}`  \n"
             f"> Coordinator URL: `{target}`  \n"
             f"> Cluster: `{settings.cluster_id}`  \n"
-            f"> Token: `{token_state}`\n\n"
+            f"> Token: `{token_state}`  \n"
+            f"> Saved UI config: `{RUNTIME_CONFIG_PATH}`\n\n"
             "> ### What This Means\n"
             "> This machine is using a shared HTTP coordinator. Any other machine with the same "
             "`COORDINATION_HTTP_URL`, `CLUSTER_ID`, and `COORDINATION_TOKEN` should appear in "
@@ -393,7 +497,8 @@ def connection_cards() -> str:
         f"> Backend: `{backend}`  \n"
         f"> State file: `{settings.coordination_state_path}`  \n"
         f"> Cluster: `{settings.cluster_id}`  \n"
-        f"> Token: `{token_state}`\n\n"
+        f"> Token: `{token_state}`  \n"
+        f"> Saved UI config: `{RUNTIME_CONFIG_PATH}`\n\n"
         "> ### Why Two Laptops May Both Show Online 1\n"
         "> If both are using local file mode, each laptop is writing its own state file. Same Wi-Fi "
         "does not share that file automatically.\n\n"
@@ -428,3 +533,12 @@ def local_lan_addresses() -> list[str]:
     except socket.gaierror:
         pass
     return sorted(addresses)
+
+
+def restart_required_message(title: str) -> str:
+    return (
+        f"## {title}\n\n"
+        f"Saved to `{RUNTIME_CONFIG_PATH}`.\n\n"
+        "Restart the UI/worker for the new connection settings to take effect. "
+        "Use `q` or Ctrl-C in the terminal for a clean shutdown."
+    )

@@ -4,6 +4,11 @@ import argparse
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from terminal_control import shutdown_message
 
 
 def main() -> None:
@@ -34,9 +39,12 @@ def main() -> None:
     if args.backends:
         env_args.extend(["--backends", args.backends])
 
-    worker = subprocess.Popen([sys.executable, "scripts/run_worker.py", *env_args])
+    worker = subprocess.Popen(
+        [sys.executable, "scripts/run_worker.py", *env_args],
+        stdin=subprocess.DEVNULL,
+    )
     try:
-        subprocess.run(
+        chainlit = subprocess.Popen(
             [
                 sys.executable,
                 "scripts/run_chainlit.py",
@@ -45,12 +53,21 @@ def main() -> None:
                 args.host,
                 "--port",
                 args.port,
-            ],
-            check=False,
+            ]
         )
+        chainlit.wait()
+    except KeyboardInterrupt:
+        shutdown_message()
     finally:
-        worker.terminate()
-        worker.wait(timeout=10)
+        for process in [locals().get("chainlit"), worker]:
+            if process and process.poll() is None:
+                process.terminate()
+        for process in [locals().get("chainlit"), worker]:
+            if process:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
 
 if __name__ == "__main__":

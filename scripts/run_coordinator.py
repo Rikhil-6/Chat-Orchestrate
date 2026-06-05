@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import uvicorn
 
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordinator_server import create_app
+from terminal_control import shutdown_message, start_q_listener
 
 
 def main() -> None:
@@ -29,7 +35,18 @@ def main() -> None:
     settings = get_settings()
     host = args.host or settings.coordinator_host
     port = args.port or settings.coordinator_port
-    uvicorn.run(create_app(settings), host=host, port=port, log_level="info")
+    try:
+        asyncio.run(serve(settings, host, port))
+    except KeyboardInterrupt:
+        shutdown_message()
+
+
+async def serve(settings, host: str, port: int) -> None:
+    config = uvicorn.Config(create_app(settings), host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    start_q_listener(lambda: setattr(server, "should_exit", True))
+    print("Press q then Enter, or Ctrl-C, to stop.")
+    await server.serve()
 
 
 if __name__ == "__main__":

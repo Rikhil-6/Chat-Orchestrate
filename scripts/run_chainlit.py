@@ -6,6 +6,8 @@ import logging
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import uvicorn
 from chainlit.auth import ensure_jwt_secret
 from chainlit.cache import init_lc_cache
@@ -14,6 +16,8 @@ from chainlit.markdown import init_markdown
 from chainlit.server import app
 from chainlit.utils import check_file
 from sniffio import current_async_library_cvar
+
+from terminal_control import shutdown_message, start_q_listener
 
 
 def main() -> None:
@@ -44,7 +48,10 @@ def main() -> None:
     init_lc_cache()
 
     current_async_library_cvar.set("asyncio")
-    asyncio.run(serve(args.host, args.port))
+    try:
+        asyncio.run(serve(args.host, args.port))
+    except KeyboardInterrupt:
+        shutdown_message()
 
 
 async def serve(host: str, port: int) -> None:
@@ -57,7 +64,10 @@ async def serve(host: str, port: int) -> None:
         log_level="error",
         ws_per_message_deflate=True,
     )
-    await uvicorn.Server(server_config).serve()
+    server = uvicorn.Server(server_config)
+    start_q_listener(lambda: setattr(server, "should_exit", True))
+    print("Press q then Enter, or Ctrl-C, to stop.")
+    await server.serve()
 
 
 def assert_app_callbacks() -> None:

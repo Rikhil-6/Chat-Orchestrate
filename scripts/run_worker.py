@@ -4,8 +4,13 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from chat_orchestrate.worker import run_worker
+from terminal_control import shutdown_message, start_q_listener
 
 
 def main() -> None:
@@ -26,7 +31,25 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     )
-    asyncio.run(run_worker())
+    try:
+        asyncio.run(run_until_stopped())
+    except KeyboardInterrupt:
+        shutdown_message()
+
+
+async def run_until_stopped() -> None:
+    loop = asyncio.get_running_loop()
+    worker_task = asyncio.create_task(run_worker())
+
+    def request_stop() -> None:
+        loop.call_soon_threadsafe(worker_task.cancel)
+
+    start_q_listener(request_stop)
+    print("Press q then Enter, or Ctrl-C, to stop.")
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        shutdown_message()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,12 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .runtime_config import apply_runtime_env
+
+apply_runtime_env(os.environ)
 
 
 class Settings(BaseSettings):

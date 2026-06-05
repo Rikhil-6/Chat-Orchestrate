@@ -69,6 +69,8 @@ In chat, use commands like:
 /claim-orchestrator
 /tasks
 /connect
+/connect-http
+/connect-file
 ```
 
 After selecting a project space, normal messages are treated as orchestration goals.
@@ -110,6 +112,8 @@ The AI delegation pass records role-specific tasks against available machines an
 
 Chainlit also shows a **Machine Status** panel on startup with native buttons to refresh status, claim/release orchestrator status, inspect recent delegated tasks, and open a connection guide. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 
+Use `/connect-http` or the **Configure HTTP** button to save the coordinator URL, cluster ID, token, machine ID, and backend list from the UI. These values are saved to ignored local runtime config in `runtime_config.json`; restart the UI/worker after saving.
+
 ## Worker Launch
 
 Run UI plus one local worker:
@@ -139,6 +143,8 @@ On macOS/Linux, use the `.sh` versions with the Python-style flags:
 Runtime files are ignored: `.env`, `coordination_state.json`, `workspace_state.json`, and `workspaces/`. A new clone starts clean.
 
 For a shared swarm, give friends the same `CLUSTER_ID`, `COORDINATION_TOKEN`, and either the shared state location or HTTP coordinator URL out of band. Do not commit those values.
+
+You can enter the shared coordinator URL and token through the UI with `/connect-http`, so friends do not have to edit `.env` for normal joining.
 
 ## OpenSwarm Notes
 
