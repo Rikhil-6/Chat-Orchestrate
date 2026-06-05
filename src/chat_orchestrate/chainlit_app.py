@@ -20,6 +20,7 @@ from chat_orchestrate.backends import (
     OPEN_SWARM_BACKEND,
     SIMULATED_BACKEND,
     backend_availability,
+    command_for_backend,
     detect_agent_backends,
     run_task,
 )
@@ -222,8 +223,8 @@ async def on_message(message: cl.Message) -> None:
 async def on_settings_update(updated_settings: dict) -> None:
     backend = str(updated_settings.get("agent_backend", "auto"))
     restore_history = bool(updated_settings.get("restore_history", True))
-    codex_command = str(updated_settings.get("codex_command", "")).strip()
-    claude_command = str(updated_settings.get("claude_command", "")).strip()
+    codex_command = clean_command_input(updated_settings.get("codex_command", ""))
+    claude_command = clean_command_input(updated_settings.get("claude_command", ""))
     cl.user_session.set("agent_backend", backend)
     cl.user_session.set("restore_history", restore_history)
     cl.user_session.set("codex_command", codex_command)
@@ -342,12 +343,14 @@ async def setup_chat_settings() -> None:
     if selected_backend not in unique_backend_values:
         selected_backend = "auto"
     restore_history = preferences.get("restore_history", "true").lower() != "false"
-    codex_command = preferences.get("codex_command", settings.codex_command)
-    claude_command = preferences.get("claude_command", settings.claude_command)
+    codex_command = clean_command_input(preferences.get("codex_command", settings.codex_command))
+    claude_command = clean_command_input(preferences.get("claude_command", settings.claude_command))
+    codex_initial = codex_command or command_for_backend(CODEX_BACKEND, settings.command_overrides) or ""
+    claude_initial = claude_command or command_for_backend(CLAUDE_CODE_BACKEND, settings.command_overrides) or ""
     cl.user_session.set("agent_backend", selected_backend)
     cl.user_session.set("restore_history", restore_history)
-    cl.user_session.set("codex_command", codex_command)
-    cl.user_session.set("claude_command", claude_command)
+    cl.user_session.set("codex_command", codex_initial)
+    cl.user_session.set("claude_command", claude_initial)
     refresh_advertised_backends(selected_backend)
     await cl.ChatSettings(
         [
@@ -367,14 +370,14 @@ async def setup_chat_settings() -> None:
             TextInput(
                 id="codex_command",
                 label="Codex Command",
-                initial=codex_command,
+                initial=codex_initial,
                 placeholder="codex, codex.cmd, or full path",
                 tooltip="Command used when Local Agent is codex.",
             ),
             TextInput(
                 id="claude_command",
                 label="Claude Command",
-                initial=claude_command,
+                initial=claude_initial,
                 placeholder="claude, claude.cmd, or full path",
                 tooltip="Command used when Local Agent is claude-code.",
             ),
@@ -404,9 +407,16 @@ def load_command_overrides() -> dict[str, str]:
         claude_command = None
     preferences = load_preferences()
     return {
-        CODEX_BACKEND: str(codex_command or preferences.get("codex_command", settings.codex_command)).strip(),
-        CLAUDE_CODE_BACKEND: str(claude_command or preferences.get("claude_command", settings.claude_command)).strip(),
+        CODEX_BACKEND: clean_command_input(codex_command or preferences.get("codex_command", settings.codex_command)),
+        CLAUDE_CODE_BACKEND: clean_command_input(
+            claude_command or preferences.get("claude_command", settings.claude_command)
+        ),
     }
+
+
+def clean_command_input(value: object) -> str:
+    clean = str(value or "").strip().strip('"').strip("'")
+    return "" if clean.lower() in {"none", "null", "undefined"} else clean
 
 
 async def restore_chat_history() -> None:

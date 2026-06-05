@@ -144,10 +144,14 @@ class LocalAgentCliClient(SwarmClient):
         return command_for_backend(backend, self.command_overrides)
 
     def _configured_command_label(self, backend: str) -> str:
-        configured = self.command_overrides.get(backend, "").strip()
+        configured = str(self.command_overrides.get(backend, "") or "").strip()
+        if configured.lower() in {"none", "null", "undefined"}:
+            configured = ""
         if configured:
             return configured
-        return "codex" if backend == CODEX_BACKEND else "claude" if backend == CLAUDE_CODE_BACKEND else backend
+        return command_for_backend(backend) or (
+            "codex" if backend == CODEX_BACKEND else "claude" if backend == CLAUDE_CODE_BACKEND else backend
+        )
 
 
 def build_swarm_client(
