@@ -12,6 +12,8 @@ The app is designed for multiple browser clients to connect to the same deployme
 - A project-space registry backed by local JSON state.
 - A distributed machine registry with orchestrator election and task delegation.
 - Mixed backend support for Codex, Claude Code, OpenSwarm, and simulated workers.
+- A compact cluster roster showing connected machines and their agent backends.
+- Local chat routing through installed Codex or Claude Code CLIs when available.
 - Git worktree helpers for isolated branch/workspace creation.
 - Markdown docs for local setup, architecture, and deployment.
 
@@ -47,6 +49,8 @@ swarm-api
 ```
 
 Open Chainlit at [http://localhost:7860](http://localhost:7860).
+
+Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex` and `claude`; if neither is available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
 
 ## Project Spaces
 
@@ -112,7 +116,7 @@ COORDINATION_TOKEN=share-this-out-of-band
 
 The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`.
 
-Chainlit also shows a **Machine Status** panel on startup with native buttons to refresh status, claim/release orchestrator status, inspect recent delegated tasks, and open a connection guide. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
+Chainlit also shows a compact **Cluster Roster** plus a **Machine Status** panel on startup. The roster is updated as you interact with the app and shows each connected machine, status, role, and agent backends. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 
 Use **Host Coordinator** or `/host-coordinator` on one running machine to start the shared HTTP coordinator from the UI. It generates a token and prints a copyable connection pack. It is the button version of:
 

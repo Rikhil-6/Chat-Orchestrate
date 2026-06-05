@@ -92,6 +92,7 @@ async def on_chat_start() -> None:
             "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`."
         )
     ).send()
+    await update_cluster_roster()
     await show_machines()
 
 
@@ -111,8 +112,9 @@ async def on_message(message: cl.Message) -> None:
         local_node = coordination.heartbeat()
         orchestrator_node = coordination.get_or_elect_orchestrator()
     except CoordinationError as exc:
-        await cl.Message(content=f"Coordination error: {exc}").send()
-        return
+            await cl.Message(content=f"Coordination error: {exc}").send()
+            return
+    await update_cluster_roster()
     status = cl.Message(
         content=(
             f"Starting orchestration for `{project.name}`...\n\n"
@@ -214,6 +216,7 @@ async def show_spaces() -> None:
 
 async def show_machines() -> None:
     coordination.heartbeat()
+    await update_cluster_roster()
     machines = coordination.list_machines()
     orchestrator_node = coordination.get_or_elect_orchestrator()
     content = machine_cards(machines, orchestrator_node.machine_id)
@@ -242,6 +245,7 @@ async def show_backends() -> None:
 
 
 async def show_connection() -> None:
+    await update_cluster_roster()
     await cl.Message(content=connection_cards(), actions=machine_actions()).send()
 
 
@@ -412,6 +416,7 @@ async def ask_text(prompt: str, default: str = "") -> str | None:
 
 
 async def show_workspace_modes() -> None:
+    await update_cluster_roster()
     await cl.Message(
         content=(
             "## Workspace Modes\n\n"
@@ -557,6 +562,83 @@ def machine_cards(machines, orchestrator_id: str) -> str:
         f"> **Stale** `{stale_count}`\n\n"
         f"{cards}"
     )
+
+
+async def update_cluster_roster() -> None:
+    try:
+        coordination.heartbeat()
+        machines = coordination.list_machines()
+        orchestrator_node = coordination.get_or_elect_orchestrator()
+    except CoordinationError:
+        return
+
+    content = cluster_roster_cards(machines, orchestrator_node.machine_id)
+    existing = cl.user_session.get("cluster_roster_message")
+    if existing is not None:
+        try:
+            existing.content = content
+            await existing.update()
+            return
+        except Exception:
+            pass
+
+    message = cl.Message(content=content, actions=cluster_roster_actions())
+    await message.send()
+    cl.user_session.set("cluster_roster_message", message)
+
+
+def cluster_roster_cards(machines, orchestrator_id: str) -> str:
+    online = [machine for machine in machines if _machine_status(machine) == "online"]
+    stale = [machine for machine in machines if _machine_status(machine) != "online"]
+    rows = "\n".join(_format_roster_row(machine, orchestrator_id) for machine in machines)
+    return (
+        "## Cluster Roster\n\n"
+        f"> **Coordinator** `{orchestrator_id}`  \n"
+        f"> **Online** `{len(online)}`  **Stale** `{len(stale)}`  \n"
+        f"> **Local chat backend** `{local_chat_backend_label()}`\n\n"
+        f"{rows}"
+    )
+
+
+def _format_roster_row(machine, orchestrator_id: str) -> str:
+    status = _machine_status(machine)
+    role = "coordinator" if machine.machine_id == orchestrator_id else machine.role
+    backends = " ".join(f"`{backend}`" for backend in machine.agent_backends)
+    return f"> `{status}` **{machine.machine_id}** `{role}` - agents {backends}\n"
+
+
+def cluster_roster_actions() -> list[cl.Action]:
+    return [
+        cl.Action(
+            name="refresh_machines",
+            label="Refresh",
+            tooltip="Refresh connected machines.",
+            icon="refresh-cw",
+            payload={},
+        ),
+        cl.Action(
+            name="host_coordinator",
+            label="Host Coordinator",
+            tooltip="Start the shared HTTP coordinator from this machine.",
+            icon="radio-tower",
+            payload={},
+        ),
+        cl.Action(
+            name="configure_http",
+            label="Connect",
+            tooltip="Connect this machine to a hosted coordinator.",
+            icon="plug",
+            payload={},
+        ),
+    ]
+
+
+def local_chat_backend_label() -> str:
+    available = [item.name for item in backend_availability(agent_backends) if item.available]
+    for backend in available:
+        if backend != "simulated":
+            return backend
+    return "simulated"
 
 
 def _format_machine_card(machine, orchestrator_id: str) -> str:
