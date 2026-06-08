@@ -182,6 +182,8 @@ async def on_message(message: cl.Message) -> None:
     cl.user_session.set("last_goal", text)
     selected_backend = cl.user_session.get("agent_backend") or "auto"
     refresh_advertised_backends(selected_backend, text)
+    if not await ensure_selected_backend_ready(selected_backend):
+        return
 
     try:
         local_node = coordination.heartbeat()
@@ -471,7 +473,13 @@ def refresh_advertised_backends(selected_backend: str = "auto", goal: str = "") 
     detected = detect_agent_backends(settings.configured_backends, load_command_overrides())
     advertised = []
     for backend in [*detected, normalize_selected_backend(selected_backend)]:
-        if backend and backend != "auto" and backend != "Select" and backend not in advertised:
+        if (
+            backend
+            and backend != "auto"
+            and backend != "Select"
+            and backend_is_callable(backend)
+            and backend not in advertised
+        ):
             advertised.append(backend)
     if not advertised:
         advertised = [SIMULATED_BACKEND]
@@ -489,6 +497,82 @@ def refresh_advertised_backends(selected_backend: str = "auto", goal: str = "") 
 
 def normalize_selected_backend(backend: str) -> str:
     return "auto" if backend == "Select" else backend
+
+
+async def ensure_selected_backend_ready(selected_backend: str) -> bool:
+    backend = normalize_selected_backend(selected_backend)
+    if backend in {"auto", SIMULATED_BACKEND}:
+        return True
+    if backend_is_callable(backend):
+        return True
+    await cl.Message(content=backend_setup_needed_cards(backend), actions=backend_setup_actions(backend)).send()
+    await show_dashboard_sidebar()
+    return False
+
+
+def backend_is_callable(backend: str) -> bool:
+    if backend in {"auto", "Select", SIMULATED_BACKEND}:
+        return True
+    command_overrides = load_command_overrides()
+    if command_for_backend(backend, command_overrides):
+        return True
+    if backend == CODEX_BACKEND and load_openai_api_key():
+        return True
+    if backend == OPEN_SWARM_BACKEND:
+        return bool(settings.open_swarm_base_url.strip())
+    return False
+
+
+def backend_setup_needed_cards(backend: str) -> str:
+    if backend == CODEX_BACKEND:
+        return (
+            "## Codex Is Selected, But Not Connected For Headless Runs\n\n"
+            "The Codex desktop app can be signed in, but this harness cannot reuse the desktop app session "
+            "as a callable backend. For distributed agent execution, this machine needs one of these:\n\n"
+            "1. A reachable Codex CLI command on `PATH`, signed in through its normal terminal flow.\n"
+            "2. A full path to the Codex CLI command in the sidebar.\n"
+            "3. An OpenAI API key saved in the sidebar for the Codex API fallback.\n\n"
+            "After setup, restart this Chainlit app from the same terminal/session that can run the command."
+        )
+    if backend == CLAUDE_CODE_BACKEND:
+        return (
+            "## Claude Code Is Selected, But Not Connected For Headless Runs\n\n"
+            "This harness talks to Claude Code through the local `claude` command. Sign in through Claude "
+            "Code's normal terminal flow, make sure `claude` is on `PATH`, or set the full command path in "
+            "the sidebar. Then restart this Chainlit app from that same terminal/session."
+        )
+    return f"## `{backend}` Is Not Ready\n\n{backend_execution_hint(backend)}"
+
+
+def backend_setup_actions(backend: str) -> list[cl.Action]:
+    actions = [
+        cl.Action(
+            name="show_backends",
+            label="Agent Status",
+            tooltip="Show local backend availability and setup hints.",
+            icon="cpu",
+            payload={},
+        ),
+        cl.Action(
+            name="refresh_dashboard",
+            label="Dashboard",
+            tooltip="Refresh the harness dashboard.",
+            icon="layout-dashboard",
+            payload={},
+        ),
+    ]
+    if backend == CODEX_BACKEND:
+        actions.insert(
+            0,
+            cl.Action(
+                name="launch_codex_app",
+                label="Launch Codex App",
+                tooltip="Open the installed Codex desktop app for normal sign-in/setup.",
+                icon="log-in",
+                payload={},
+            ),
+        )
+    return actions
 
 
 def save_agent_credentials(backend: str, values: dict) -> None:
@@ -1125,7 +1209,8 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     project = cl.user_session.get("project_space")
     last_goal = str(cl.user_session.get("last_goal") or "")
     selected_backend = selected_chat_backend()
-    local_capabilities = infer_machine_capabilities(
+    selected_ready = backend_is_callable(selected_backend)
+    local_capabilities = agent_roles if not selected_ready else infer_machine_capabilities(
         agent_backends,
         selected_backend,
         settings.default_agents,
@@ -1151,6 +1236,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         },
         "policy": {
             "selected_backend": selected_backend,
+            "selected_ready": selected_ready,
             "capabilities": local_capabilities,
             "goal_roles": infer_goal_roles(last_goal, settings.default_agents),
             "last_goal": last_goal,
@@ -1393,15 +1479,29 @@ def command_help() -> str:
 
 
 def backend_status_cards() -> str:
-    items = backend_availability(agent_backends, load_command_overrides())
+    visible_backends = []
+    for backend in [CODEX_BACKEND, CLAUDE_CODE_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND, *agent_backends]:
+        if backend not in visible_backends:
+            visible_backends.append(backend)
+    items = backend_availability(visible_backends, load_command_overrides())
     lines = []
     for item in items:
-        state = "headless-ready" if item.available else "installed-app-only" if item.installed_app else "not-ready"
+        state = backend_readiness_label(item.name, item.available, bool(item.installed_app))
         command = f" `{item.command}`" if item.command else ""
         app = f"\n> App: `{item.installed_app}`" if item.installed_app else ""
         hint = "" if item.available else f"\n> {backend_execution_hint(item.name)}"
         lines.append(f"> ### {item.name}\n> `{state}`{command}{app}{hint}\n")
     return "## Agent Backends\n\n" + "\n".join(lines)
+
+
+def backend_readiness_label(backend: str, command_available: bool, installed_app: bool) -> str:
+    if command_available:
+        return "headless-ready"
+    if backend == CODEX_BACKEND and load_openai_api_key():
+        return "api-fallback-ready"
+    if installed_app:
+        return "app-installed-login-only"
+    return "not-ready"
 
 
 def connection_cards() -> str:

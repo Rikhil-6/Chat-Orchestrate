@@ -58,6 +58,8 @@ Machine capability tags are computed, not hand-authored. The coordinator infers 
 
 On startup, the app opens a **Harness Dashboard** side panel with live machines, local execution policy, workspace details, and repo-consolidation flow. The chat bar remains the place to talk to the local/coordinating agent. Use `/dashboard` or the **Dashboard** action to reopen the panel after closing it.
 
+Selecting an agent is separate from being ready to execute it. Codex and Claude Code should be signed in through their normal local CLI flows and launched from a terminal where `codex` or `claude` is on `PATH`, or configured with a full command path in the sidebar. A signed-in desktop app can be launched for setup, but the harness cannot reuse a GUI-only desktop session as a headless worker unless a callable CLI/API path is also available. If Codex CLI is unavailable, saving an OpenAI API key in the sidebar enables the Codex API fallback.
+
 ## Project Spaces
 
 Project spaces are kept under `WORKSPACES_ROOT` unless an absolute path is supplied. The default is:

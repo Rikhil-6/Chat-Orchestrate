@@ -124,7 +124,9 @@ export default function HarnessDashboard() {
           <div className="grid gap-2 text-xs">
             <div className="flex justify-between gap-3">
               <span className="text-muted-foreground">Selected agent</span>
-              <strong>{policy.selected_backend || "auto"}</strong>
+              <strong>
+                {policy.selected_backend || "auto"} / {policy.selected_ready ? "ready" : "setup needed"}
+              </strong>
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-muted-foreground">Advertised tags</span>
