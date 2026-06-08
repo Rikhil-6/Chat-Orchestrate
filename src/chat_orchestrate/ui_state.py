@@ -40,11 +40,33 @@ def load_preferences() -> dict[str, str]:
     return {str(key): str(value) for key, value in preferences.items()}
 
 
+def load_credentials(path: Path = UI_STATE_PATH) -> dict[str, dict[str, str]]:
+    credentials = load_ui_state(path).get("credentials", {})
+    if not isinstance(credentials, dict):
+        return {}
+    result = {}
+    for backend, values in credentials.items():
+        if isinstance(values, dict):
+            result[str(backend)] = {str(key): str(value) for key, value in values.items()}
+    return result
+
+
 def save_preferences(values: dict[str, str]) -> None:
     payload = load_ui_state()
     preferences = payload.setdefault("preferences", {})
     preferences.update({key: value for key, value in values.items() if value is not None})
     save_ui_state(payload)
+
+
+def save_credentials(backend: str, values: dict[str, str], path: Path = UI_STATE_PATH) -> None:
+    payload = load_ui_state(path)
+    credentials = payload.setdefault("credentials", {})
+    backend_values = credentials.setdefault(backend, {})
+    for key, value in values.items():
+        clean = str(value or "").strip()
+        if clean:
+            backend_values[key] = clean
+    save_ui_state(payload, path)
 
 
 def append_chat(role: str, author: str, content: str) -> None:

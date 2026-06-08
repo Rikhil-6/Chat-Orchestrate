@@ -7,7 +7,7 @@ import secrets
 import socket
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import chainlit as cl
@@ -29,7 +29,7 @@ from chat_orchestrate.backends import (
 )
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
-from chat_orchestrate.models import OrchestrationRun
+from chat_orchestrate.models import MachineNode, OrchestrationRun
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
@@ -38,7 +38,9 @@ from chat_orchestrate.ui_state import (
     append_chat,
     clear_chat_history,
     load_chat_history,
+    load_credentials,
     load_preferences,
+    save_credentials,
     save_preferences,
 )
 
@@ -166,7 +168,7 @@ async def on_chat_start() -> None:
             "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
             "`/workspace-modes`, `/machines`, "
             "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
-            "`/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`, "
+            "`/mock-cluster`, `/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`, "
             "`/end-session`, `/clear-history`."
         )
     ).send()
@@ -231,7 +233,7 @@ async def on_message(message: cl.Message) -> None:
 
 @cl.on_settings_update
 async def on_settings_update(updated_settings: dict) -> None:
-    backend = str(updated_settings.get("agent_backend", "auto"))
+    backend = normalize_selected_backend(str(updated_settings.get("agent_backend", "Select")))
     restore_history = bool(updated_settings.get("restore_history", True))
     openai_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
     codex_command = validated_command_preference(
@@ -248,6 +250,7 @@ async def on_settings_update(updated_settings: dict) -> None:
     cl.user_session.set("codex_command", codex_command)
     cl.user_session.set("claude_command", claude_command)
     refresh_advertised_backends(backend)
+    save_agent_credentials(backend, updated_settings)
     save_preferences(
         {
             "agent_backend": backend,
@@ -256,6 +259,7 @@ async def on_settings_update(updated_settings: dict) -> None:
             "claude_command": claude_command,
         }
     )
+    await setup_chat_settings(backend)
     await update_cluster_roster()
 
 
@@ -305,6 +309,8 @@ async def handle_command(text: str) -> None:
             await show_tasks()
         elif command == "/backends":
             await show_backends()
+        elif command == "/mock-cluster":
+            await show_mock_cluster()
         elif command == "/connect":
             await show_connection()
         elif command == "/host-coordinator":
@@ -343,10 +349,11 @@ async def show_spaces() -> None:
     await cl.Message(content="## Project Spaces\n\n" + "\n".join(lines)).send()
 
 
-async def setup_chat_settings() -> None:
+async def setup_chat_settings(selected_backend: str | None = None) -> None:
     preferences = load_preferences()
+    credentials = load_credentials()
     backend_values = [
-        "auto",
+        "Select",
         CODEX_BACKEND,
         CLAUDE_CODE_BACKEND,
         OPEN_SWARM_BACKEND,
@@ -357,18 +364,23 @@ async def setup_chat_settings() -> None:
     for backend in backend_values:
         if backend not in unique_backend_values:
             unique_backend_values.append(backend)
-    selected_backend = preferences.get("agent_backend", "auto")
+    selected_backend = selected_backend or preferences.get("agent_backend", "Select")
     if selected_backend not in unique_backend_values:
-        selected_backend = "auto"
+        selected_backend = "Select"
     restore_history = preferences.get("restore_history", "true").lower() != "false"
-    openai_api_key = ""
+    codex_credentials = credentials.get(CODEX_BACKEND, {})
+    claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
+    openswarm_credentials = credentials.get(OPEN_SWARM_BACKEND, {})
+    openai_api_key = clean_secret_input(codex_credentials.get("openai_api_key", ""))
     codex_command = validated_command_preference(
         CODEX_BACKEND,
-        clean_command_input(preferences.get("codex_command", settings.codex_command)),
+        clean_command_input(codex_credentials.get("codex_command", preferences.get("codex_command", settings.codex_command))),
     )
     claude_command = validated_command_preference(
         CLAUDE_CODE_BACKEND,
-        clean_command_input(preferences.get("claude_command", settings.claude_command)),
+        clean_command_input(
+            claude_credentials.get("claude_command", preferences.get("claude_command", settings.claude_command))
+        ),
     )
     codex_initial = codex_command or command_for_backend(CODEX_BACKEND, settings.command_overrides) or ""
     claude_initial = claude_command or command_for_backend(CLAUDE_CODE_BACKEND, settings.command_overrides) or ""
@@ -384,57 +396,124 @@ async def setup_chat_settings() -> None:
             "claude_command": claude_command,
         }
     )
-    await cl.ChatSettings(
-        [
-            Select(
-                id="agent_backend",
-                label="Local Agent",
-                values=unique_backend_values,
-                initial=selected_backend,
-                tooltip="Choose which locally installed agent CLI should answer chat turns.",
-            ),
-            Switch(
-                id="restore_history",
-                label="Restore local chat on refresh",
-                initial=restore_history,
-                tooltip="Replay recent local chat records when the page reconnects.",
-            ),
+    widgets = [
+        Select(
+            id="agent_backend",
+            label="Local Agent",
+            values=unique_backend_values,
+            initial=selected_backend,
+            tooltip="Choose which locally installed agent should power this machine.",
+        ),
+        Switch(
+            id="restore_history",
+            label="Restore local chat on refresh",
+            initial=restore_history,
+            tooltip="Replay recent local chat records when the page reconnects.",
+        ),
+    ]
+    if selected_backend == CODEX_BACKEND:
+        widgets.extend(
+            [
             TextInput(
                 id="openai_api_key",
                 label="OpenAI API Key",
                 initial=openai_api_key,
-                placeholder="Optional session key for Codex API fallback",
-                tooltip="Used only in this Chainlit session; it is not saved to ui_state.json.",
+                    placeholder="Saved locally; used for Codex API fallback",
+                    tooltip="Saved locally in ignored ui_state.json for this machine.",
             ),
             TextInput(
                 id="codex_command",
                 label="Codex Command",
                 initial=codex_initial,
                 placeholder="codex, codex.cmd, or full path",
-                tooltip="Command used when Local Agent is codex.",
+                    tooltip="Optional local Codex CLI command. API fallback is used if this is blank or unavailable.",
             ),
+            ]
+        )
+    elif selected_backend == CLAUDE_CODE_BACKEND:
+        widgets.append(
             TextInput(
                 id="claude_command",
                 label="Claude Command",
                 initial=claude_initial,
                 placeholder="claude, claude.cmd, or full path",
                 tooltip="Command used when Local Agent is claude-code.",
-            ),
-        ]
-    ).send()
+            )
+        )
+    elif selected_backend == OPEN_SWARM_BACKEND:
+        widgets.extend(
+            [
+                TextInput(
+                    id="open_swarm_base_url",
+                    label="OpenSwarm URL",
+                    initial=openswarm_credentials.get("open_swarm_base_url", settings.open_swarm_base_url),
+                    placeholder="http://localhost:8000",
+                    tooltip="OpenAI-compatible OpenSwarm endpoint.",
+                ),
+                TextInput(
+                    id="open_swarm_api_key",
+                    label="OpenSwarm API Key",
+                    initial=openswarm_credentials.get("open_swarm_api_key", settings.open_swarm_api_key),
+                    placeholder="Optional",
+                    tooltip="Saved locally in ignored ui_state.json for this machine.",
+                ),
+                TextInput(
+                    id="open_swarm_model",
+                    label="OpenSwarm Model",
+                    initial=openswarm_credentials.get("open_swarm_model", settings.open_swarm_model),
+                    placeholder=settings.open_swarm_model,
+                    tooltip="Model name used by the OpenSwarm endpoint.",
+                ),
+            ]
+        )
+
+    await cl.ChatSettings(widgets).send()
 
 
 def refresh_advertised_backends(selected_backend: str = "auto") -> None:
     global agent_backends
     detected = detect_agent_backends(settings.configured_backends, load_command_overrides())
     advertised = []
-    for backend in [*detected, selected_backend]:
-        if backend and backend != "auto" and backend not in advertised:
+    for backend in [*detected, normalize_selected_backend(selected_backend)]:
+        if backend and backend != "auto" and backend != "Select" and backend not in advertised:
             advertised.append(backend)
     if not advertised:
         advertised = [SIMULATED_BACKEND]
     agent_backends = advertised
     coordination.agent_backends = advertised
+
+
+def normalize_selected_backend(backend: str) -> str:
+    return "auto" if backend == "Select" else backend
+
+
+def save_agent_credentials(backend: str, values: dict) -> None:
+    if backend == CODEX_BACKEND:
+        payload = {
+            "openai_api_key": clean_secret_input(values.get("openai_api_key", "")),
+            "codex_command": validated_command_preference(
+                CODEX_BACKEND,
+                clean_command_input(values.get("codex_command", "")),
+            ),
+        }
+        save_credentials(CODEX_BACKEND, payload)
+    elif backend == CLAUDE_CODE_BACKEND:
+        payload = {
+            "claude_command": validated_command_preference(
+                CLAUDE_CODE_BACKEND,
+                clean_command_input(values.get("claude_command", "")),
+            ),
+        }
+        save_credentials(CLAUDE_CODE_BACKEND, payload)
+    elif backend == OPEN_SWARM_BACKEND:
+        save_credentials(
+            OPEN_SWARM_BACKEND,
+            {
+                "open_swarm_base_url": clean_command_input(values.get("open_swarm_base_url", "")),
+                "open_swarm_api_key": clean_secret_input(values.get("open_swarm_api_key", "")),
+                "open_swarm_model": clean_command_input(values.get("open_swarm_model", "")),
+            },
+        )
 
 
 def load_command_overrides() -> dict[str, str]:
@@ -445,10 +524,19 @@ def load_command_overrides() -> dict[str, str]:
         codex_command = None
         claude_command = None
     preferences = load_preferences()
+    credentials = load_credentials()
+    codex_credentials = credentials.get(CODEX_BACKEND, {})
+    claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
     return {
-        CODEX_BACKEND: clean_command_input(codex_command or preferences.get("codex_command", settings.codex_command)),
+        CODEX_BACKEND: clean_command_input(
+            codex_command
+            or codex_credentials.get("codex_command")
+            or preferences.get("codex_command", settings.codex_command)
+        ),
         CLAUDE_CODE_BACKEND: clean_command_input(
-            claude_command or preferences.get("claude_command", settings.claude_command)
+            claude_command
+            or claude_credentials.get("claude_command")
+            or preferences.get("claude_command", settings.claude_command)
         ),
     }
 
@@ -458,7 +546,9 @@ def load_openai_api_key() -> str:
         session_key = cl.user_session.get("openai_api_key")
     except Exception:
         session_key = ""
-    return clean_secret_input(session_key) or settings.openai_api_key.strip()
+    credentials = load_credentials()
+    codex_credentials = credentials.get(CODEX_BACKEND, {})
+    return clean_secret_input(session_key) or clean_secret_input(codex_credentials.get("openai_api_key", "")) or settings.openai_api_key.strip()
 
 
 def validated_command_preference(backend: str, command: str) -> str:
@@ -519,6 +609,43 @@ async def show_tasks() -> None:
 
 async def show_backends() -> None:
     await cl.Message(content=backend_status_cards(), actions=machine_actions()).send()
+
+
+async def show_mock_cluster() -> None:
+    now = datetime.now(UTC)
+    machines = [
+        MachineNode(
+            machine_id="sg-akc-dt330",
+            hostname="SG-AKC-DT330",
+            role="orchestrator",
+            status="online",
+            capabilities=["coordinator", "backend", "reviewer"],
+            agent_backends=[CODEX_BACKEND],
+            last_seen=now,
+        ),
+        MachineNode(
+            machine_id="desktop-p4k08ab",
+            hostname="DESKTOP-P4K08AB",
+            role="worker",
+            status="online",
+            capabilities=["frontend", "engineer", "documenter"],
+            agent_backends=[CLAUDE_CODE_BACKEND],
+            last_seen=now - timedelta(seconds=6),
+        ),
+        MachineNode(
+            machine_id="maya-mbp",
+            hostname="MAYA-MBP",
+            role="worker",
+            status="online",
+            capabilities=["researcher", "reviewer"],
+            agent_backends=[SIMULATED_BACKEND],
+            last_seen=now - timedelta(seconds=13),
+        ),
+    ]
+    await cl.Message(
+        content=mock_cluster_cards(machines),
+        actions=cluster_roster_actions(),
+    ).send()
 
 
 async def show_connection() -> None:
@@ -768,6 +895,11 @@ async def show_backends_action(_: cl.Action) -> None:
     await show_backends()
 
 
+@cl.action_callback("show_mock_cluster")
+async def show_mock_cluster_action(_: cl.Action) -> None:
+    await show_mock_cluster()
+
+
 @cl.action_callback("launch_codex_app")
 async def launch_codex_app_action(_: cl.Action) -> None:
     if launch_backend_app(CODEX_BACKEND):
@@ -847,6 +979,13 @@ def machine_actions() -> list[cl.Action]:
             label="Backends",
             tooltip="Show local agent backend availability.",
             icon="cpu",
+            payload={},
+        ),
+        cl.Action(
+            name="show_mock_cluster",
+            label="Mock Harness",
+            tooltip="Preview simulated multi-device agent coordination.",
+            icon="monitor-dot",
             payload={},
         ),
         cl.Action(
@@ -948,6 +1087,58 @@ def cluster_roster_cards(machines, orchestrator_id: str) -> str:
         f"> **Local chat backend** `{local_chat_backend_label()}`\n\n"
         f"{rows}"
     )
+
+
+def mock_cluster_cards(machines: list[MachineNode]) -> str:
+    rows = "\n".join(_format_mock_machine_card(machine) for machine in machines)
+    return (
+        "## Distributed Agent Harness Mockup\n\n"
+        "> **Session** `friends-project`  \n"
+        "> **Workspace** `simple-website`  \n"
+        "> **Coordinator** `sg-akc-dt330`  \n"
+        "> **Task split** `backend -> sg-akc-dt330 / codex`, "
+        "`frontend -> desktop-p4k08ab / claude-code`, `review -> maya-mbp / simulated`\n\n"
+        f"{rows}\n"
+        "### Internal Flow\n\n"
+        "1. User picks a local agent in the sidebar on each machine.\n"
+        "2. The sidebar shows only that agent's credential/profile fields.\n"
+        "3. Credentials are saved locally in ignored `ui_state.json` on that machine.\n"
+        "4. Each machine heartbeats its selected backend and readiness to the coordinator.\n"
+        "5. The orchestrator delegates work to machines with matching roles and ready backends.\n"
+    )
+
+
+def _format_mock_machine_card(machine: MachineNode) -> str:
+    age = max(0, int((datetime.now(UTC) - machine.last_seen).total_seconds()))
+    backends = " ".join(f"`{backend}`" for backend in machine.agent_backends)
+    capabilities = " ".join(f"`{capability}`" for capability in machine.capabilities)
+    credential_status = mock_credential_status(machine.agent_backends[0])
+    assignment = mock_assignment(machine.machine_id)
+    return (
+        f"> ### {machine.machine_id}\n"
+        f"> `{machine.status}` `{machine.role}` `seen {age}s ago`  \n"
+        f"> Host: `{machine.hostname}`  \n"
+        f"> Agent: {backends}  \n"
+        f"> Credentials: {credential_status}  \n"
+        f"> Capabilities: {capabilities}  \n"
+        f"> Assignment: {assignment}\n"
+    )
+
+
+def mock_credential_status(backend: str) -> str:
+    if backend == CODEX_BACKEND:
+        return "`saved OpenAI key` `CLI optional`"
+    if backend == CLAUDE_CODE_BACKEND:
+        return "`local Claude login` `command saved`"
+    return "`none required`"
+
+
+def mock_assignment(machine_id: str) -> str:
+    if machine_id == "sg-akc-dt330":
+        return "`backend API + coordinator plan`"
+    if machine_id == "desktop-p4k08ab":
+        return "`frontend build + browser check`"
+    return "`review notes + risk scan`"
 
 
 def _format_roster_row(machine, orchestrator_id: str) -> str:
@@ -1060,6 +1251,7 @@ def command_help() -> str:
         "- `/release-orchestrator`\n"
         "- `/tasks`\n"
         "- `/backends`\n"
+        "- `/mock-cluster`\n"
         "- `/connect`\n"
         "- `/host-coordinator`\n"
         "- `/connect-coordinator`\n"
