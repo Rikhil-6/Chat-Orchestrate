@@ -27,6 +27,7 @@ from chat_orchestrate.backends import (
     launch_backend_app,
     run_task,
 )
+from chat_orchestrate.capabilities import capability_policy_summary, infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import MachineNode, OrchestrationRun
@@ -46,8 +47,7 @@ from chat_orchestrate.ui_state import (
 
 settings = get_settings()
 agent_backends = detect_agent_backends(settings.configured_backends, settings.command_overrides)
-agent_roles = [*settings.default_agents, "backend", "frontend"]
-agent_roles = list(dict.fromkeys(agent_roles))
+agent_roles = infer_machine_capabilities(agent_backends, defaults=settings.default_agents)
 spaces = ProjectSpaceManager(settings.workspaces_root, settings.workspace_state_path)
 coordination = CoordinationManager(
     settings.coordination_state_path,
@@ -188,6 +188,8 @@ async def on_message(message: cl.Message) -> None:
         await cl.Message(content="Pick a project space first with `/use <name>`.").send()
         return
     append_chat("user", "You", text)
+    selected_backend = cl.user_session.get("agent_backend") or "auto"
+    refresh_advertised_backends(selected_backend, text)
 
     try:
         local_node = coordination.heartbeat()
@@ -205,8 +207,6 @@ async def on_message(message: cl.Message) -> None:
     )
     await status.send()
 
-    selected_backend = cl.user_session.get("agent_backend") or "auto"
-    refresh_advertised_backends(selected_backend)
     turn_orchestrator = Orchestrator(
         build_swarm_client(
             settings,
@@ -470,8 +470,8 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
     await cl.ChatSettings(widgets).send()
 
 
-def refresh_advertised_backends(selected_backend: str = "auto") -> None:
-    global agent_backends
+def refresh_advertised_backends(selected_backend: str = "auto", goal: str = "") -> None:
+    global agent_backends, agent_roles
     detected = detect_agent_backends(settings.configured_backends, load_command_overrides())
     advertised = []
     for backend in [*detected, normalize_selected_backend(selected_backend)]:
@@ -479,8 +479,16 @@ def refresh_advertised_backends(selected_backend: str = "auto") -> None:
             advertised.append(backend)
     if not advertised:
         advertised = [SIMULATED_BACKEND]
+    roles = infer_machine_capabilities(
+        advertised,
+        normalize_selected_backend(selected_backend),
+        settings.default_agents,
+        goal,
+    )
     agent_backends = advertised
+    agent_roles = roles
     coordination.agent_backends = advertised
+    coordination.agent_roles = roles
 
 
 def normalize_selected_backend(backend: str) -> str:
@@ -613,13 +621,14 @@ async def show_backends() -> None:
 
 async def show_mock_cluster() -> None:
     now = datetime.now(UTC)
+    mock_goal = "build a simple website: backend here, frontend on desktop-p4k08ab, then review and merge"
     machines = [
         MachineNode(
             machine_id="sg-akc-dt330",
             hostname="SG-AKC-DT330",
             role="orchestrator",
             status="online",
-            capabilities=["coordinator", "backend", "reviewer"],
+            capabilities=infer_machine_capabilities([CODEX_BACKEND], CODEX_BACKEND, settings.default_agents, mock_goal),
             agent_backends=[CODEX_BACKEND],
             last_seen=now,
         ),
@@ -628,7 +637,12 @@ async def show_mock_cluster() -> None:
             hostname="DESKTOP-P4K08AB",
             role="worker",
             status="online",
-            capabilities=["frontend", "engineer", "documenter"],
+            capabilities=infer_machine_capabilities(
+                [CLAUDE_CODE_BACKEND],
+                CLAUDE_CODE_BACKEND,
+                settings.default_agents,
+                mock_goal,
+            ),
             agent_backends=[CLAUDE_CODE_BACKEND],
             last_seen=now - timedelta(seconds=6),
         ),
@@ -637,7 +651,12 @@ async def show_mock_cluster() -> None:
             hostname="MAYA-MBP",
             role="worker",
             status="online",
-            capabilities=["researcher", "reviewer"],
+            capabilities=infer_machine_capabilities(
+                [SIMULATED_BACKEND],
+                SIMULATED_BACKEND,
+                settings.default_agents,
+                mock_goal,
+            ),
             agent_backends=[SIMULATED_BACKEND],
             last_seen=now - timedelta(seconds=13),
         ),
@@ -1090,28 +1109,46 @@ def cluster_roster_cards(machines, orchestrator_id: str) -> str:
 
 
 def mock_cluster_cards(machines: list[MachineNode]) -> str:
-    rows = "\n".join(_format_mock_machine_card(machine) for machine in machines)
+    goal = "build a simple website: backend here, frontend on desktop-p4k08ab, then review and merge"
+    rows = "\n".join(_format_mock_machine_card(machine, goal) for machine in machines)
     return (
         "## Distributed Agent Harness Mockup\n\n"
         "> **Session** `friends-project`  \n"
         "> **Workspace** `simple-website`  \n"
         "> **Coordinator** `sg-akc-dt330`  \n"
+        f"> **Goal-derived policy** `{goal}`  \n"
         "> **Task split** `backend -> sg-akc-dt330 / codex`, "
         "`frontend -> desktop-p4k08ab / claude-code`, `review -> maya-mbp / simulated`\n\n"
         f"{rows}\n"
+        "### Dynamic Policy\n\n"
+        "The capability tags are inferred from each machine's selected local agent, detected tools, "
+        "saved readiness, and the current chat goal. They should not be hand-maintained per machine.\n\n"
+        "### Repo Consolidation Model\n\n"
+        "1. **Canonical repo**: `origin/main` remains the shared source of truth.\n"
+        "2. **Worktree mode**: each machine works in a branch/worktree such as "
+        "`codex/backend-api` or `claude/frontend-ui`.\n"
+        "3. **Clone mode**: each machine works in its own clone, then returns a branch, patch, or PR.\n"
+        "4. **Preview bridge**: a frontend worker can publish a local preview URL or artifact link back "
+        "to the coordinator so backend-only machines can inspect the UI.\n"
+        "5. **Merge pass**: the coordinator pulls task outputs, runs tests, reviews conflicts, and merges "
+        "into the project workspace.\n\n"
         "### Internal Flow\n\n"
         "1. User picks a local agent in the sidebar on each machine.\n"
         "2. The sidebar shows only that agent's credential/profile fields.\n"
         "3. Credentials are saved locally in ignored `ui_state.json` on that machine.\n"
         "4. Each machine heartbeats its selected backend and readiness to the coordinator.\n"
         "5. The orchestrator delegates work to machines with matching roles and ready backends.\n"
+        "6. Task results include repo branch/patch/preview metadata, not only chat text.\n"
     )
 
 
-def _format_mock_machine_card(machine: MachineNode) -> str:
+def _format_mock_machine_card(machine: MachineNode, goal: str) -> str:
     age = max(0, int((datetime.now(UTC) - machine.last_seen).total_seconds()))
     backends = " ".join(f"`{backend}`" for backend in machine.agent_backends)
     capabilities = " ".join(f"`{capability}`" for capability in machine.capabilities)
+    policy = " ".join(
+        f"`{item}`" for item in capability_policy_summary(machine.agent_backends, machine.agent_backends[0], goal)
+    )
     credential_status = mock_credential_status(machine.agent_backends[0])
     assignment = mock_assignment(machine.machine_id)
     return (
@@ -1120,6 +1157,7 @@ def _format_mock_machine_card(machine: MachineNode) -> str:
         f"> Host: `{machine.hostname}`  \n"
         f"> Agent: {backends}  \n"
         f"> Credentials: {credential_status}  \n"
+        f"> Policy: {policy}  \n"
         f"> Capabilities: {capabilities}  \n"
         f"> Assignment: {assignment}\n"
     )

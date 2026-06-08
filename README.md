@@ -54,6 +54,8 @@ Normal chat messages use locally installed agent CLIs when available. With `AGEN
 
 The Chainlit sidebar includes a **Local Agent** selector so you can choose `codex`, `claude-code`, `openswarm`, or `simulated` without editing `.env`. The sidebar updates to show only the credential/profile fields for that selected agent. The selected backend is advertised to the cluster, and chat turns use that local profile when it is ready. Codex can use a working CLI command or a saved `OPENAI_API_KEY` / sidebar **OpenAI API Key** for Responses API fallback. Claude Code uses its local command/login profile. Credentials are saved locally in ignored `ui_state.json`, so each computer keeps its own agent harness profile without committing secrets. The app can also detect the Microsoft Store Codex desktop app and offer **Launch Codex App** for login/setup, but GUI app installation is separate from headless agent execution. Use `/mock-cluster` to preview a simulated multi-device harness.
 
+Machine capability tags are computed, not hand-authored. The coordinator infers roles from the selected local agent, detected tool readiness, the default agent set, and the current chat goal. A prompt that asks for a backend here and frontend on another machine should advertise and route `backend`/`frontend` work differently from a prompt that only asks for review or documentation.
+
 ## Project Spaces
 
 Project spaces are kept under `WORKSPACES_ROOT` unless an absolute path is supplied. The default is:
@@ -87,6 +89,8 @@ In chat, use commands like:
 After selecting a project space, normal messages are treated as orchestration goals.
 
 Use **worktree mode** when agents are working on the same project with separate branches. Use **clone mode** when agents should explore separate copies or competing versions of the same repository.
+
+Distributed code still converges through one canonical project repo. In worktree mode, machines return branches such as `codex/backend-api` or `claude/frontend-ui`; in clone mode, they return patches, branches, PRs, or artifacts. Frontend machines should also return preview URLs or screenshots so backend-only machines can inspect the result before the coordinator merges everything into the selected project space.
 
 ## Multi-Machine Coordination
 

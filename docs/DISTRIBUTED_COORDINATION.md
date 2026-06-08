@@ -48,12 +48,21 @@ When a user sends a normal prompt:
 
 1. The app refreshes the local machine heartbeat.
 2. It resolves the active orchestrator.
-3. It creates delegated tasks from the goal and available machine capabilities.
+3. It infers goal roles from the prompt, such as `backend`, `frontend`, `reviewer`, or `documenter`.
 4. It sends the delegation plan into the agent context.
 5. It records the run's assignments in `coordination_state.json`.
 6. Workers poll for tasks assigned to their `MACHINE_ID` and matching backend.
 
 Workers dry-run by default, which lets you test Codex and Claude Code mixes without invoking external agent CLIs.
+
+Machine capability tags are dynamic. Each app or worker advertises capabilities from:
+
+- the selected local agent profile, such as Codex, Claude Code, OpenSwarm, or simulated;
+- detected command/API readiness on that machine;
+- the current chat goal, which can temporarily add role tags like `backend` or `frontend`;
+- the default agent set used as a fallback.
+
+That means the UI tags should be read as the coordinator's current execution policy, not as manually edited labels.
 
 ## Coordination Backends
 
@@ -200,3 +209,13 @@ Coordination state only decides which machine gets which task. Project space mod
 - `local`: a plain folder is used without git workspace management.
 
 Use worktrees when everyone is contributing to one shared project history. Use clones when you want separate experiments that may never merge.
+
+## Consolidating Code Outputs
+
+Distributed machines should still converge through one canonical project repo.
+
+- In **worktree mode**, each worker uses a branch/worktree such as `codex/backend-api` or `claude/frontend-ui`, then pushes or hands the branch back to the coordinator for review and merge.
+- In **clone mode**, each worker has its own clone and returns a patch, branch, PR link, or artifact bundle.
+- Frontend workers should report preview URLs or screenshots as task artifacts so backend-only machines can inspect the UI without having the frontend source open locally.
+- Backend workers should report server URLs, API contracts, generated OpenAPI files, or test commands so frontend workers can integrate against the right shape.
+- The coordinator's merge pass should pull outputs into the selected project space, run tests, resolve conflicts, and record the final branch or commit.

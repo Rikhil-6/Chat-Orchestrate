@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 
 from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND
+from .capabilities import infer_goal_roles
 from .models import DelegatedTask, MachineNode, ProjectSpace
 
 
@@ -181,25 +182,7 @@ class CoordinationManager:
         self._save(state)
 
     def _roles_for_goal(self, goal: str) -> list[str]:
-        lowered = goal.lower()
-        roles = ["coordinator"]
-        if any(word in lowered for word in ["backend", "back-end", "api", "server"]):
-            roles.append("backend")
-        if any(word in lowered for word in ["frontend", "front-end", "ui", "website"]):
-            roles.append("frontend")
-        if any(word in lowered for word in ["research", "discover", "compare", "investigate"]):
-            roles.append("researcher")
-        if any(word in lowered for word in ["build", "code", "implement", "fix", "add", "launch"]):
-            roles.append("engineer")
-        if any(word in lowered for word in ["test", "review", "qa", "risk", "verify"]):
-            roles.append("reviewer")
-        if any(word in lowered for word in ["doc", "readme", "deploy", "handoff"]):
-            roles.append("documenter")
-
-        for fallback in ["researcher", "engineer", "reviewer", "documenter"]:
-            if fallback not in roles:
-                roles.append(fallback)
-        return roles
+        return infer_goal_roles(goal)
 
     def _best_machine_for_role(self, machines: list[MachineNode], role: str, goal: str = "") -> MachineNode:
         hinted = self._hinted_machine_for_role(machines, role, goal)

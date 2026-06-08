@@ -5,6 +5,7 @@ import logging
 import os
 
 from .backends import detect_agent_backends, run_task
+from .capabilities import infer_machine_capabilities
 from .config import Settings, get_settings
 from .coordination import CoordinationError, CoordinationManager
 from .runtime_config import RUNTIME_CONFIG_PATH, apply_runtime_env, clear_runtime_process_env
@@ -15,13 +16,13 @@ LOGGER = logging.getLogger("chat_orchestrate.worker")
 
 def build_coordination(settings: Settings | None = None) -> CoordinationManager:
     settings = settings or get_settings()
-    agent_roles = [*settings.default_agents, "backend", "frontend"]
-    agent_roles = list(dict.fromkeys(agent_roles))
+    agent_backends = detect_agent_backends(settings.configured_backends, settings.command_overrides)
+    agent_roles = infer_machine_capabilities(agent_backends, defaults=settings.default_agents)
     return CoordinationManager(
         settings.coordination_state_path,
         settings.machine_id,
         agent_roles,
-        detect_agent_backends(settings.configured_backends, settings.command_overrides),
+        agent_backends,
         settings.orchestrator_ttl_seconds,
         settings.cluster_id,
         settings.coordination_token,
