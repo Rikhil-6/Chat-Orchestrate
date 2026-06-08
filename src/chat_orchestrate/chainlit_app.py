@@ -1020,7 +1020,14 @@ async def configure_http_connection() -> None:
 
     validation_error = await validate_coordinator_token(live_url, cluster_id, token)
     if validation_error:
-        await cl.Message(content=f"Coordinator token check failed: {validation_error}").send()
+        await cl.Message(
+            content=(
+                f"Coordinator token check failed: {validation_error}\n\n"
+                "The URL is reachable, but that coordinator is not using the token you pasted. "
+                "On the host machine, click **End Session**, then **Host** again and copy the newest "
+                "connection pack. If the host had an old coordinator terminal open, close it too."
+            )
+        ).send()
         return
 
     save_runtime_env(
@@ -1834,9 +1841,9 @@ def local_coordinator_urls(port: int) -> list[str]:
     return [f"http://{address}:{port}" for address in addresses]
 
 
-def hosted_state_path(cluster_id: str) -> Path:
+def hosted_state_path(cluster_id: str, port: int) -> Path:
     safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in cluster_id)
-    return Path(".tmp") / f"hosted-coordinator-{safe or 'cluster'}.json"
+    return Path(".tmp") / f"hosted-coordinator-{safe or 'cluster'}-{port}.json"
 
 
 def hosted_coordinator_message(cluster_id: str, token: str, port: int) -> str:
@@ -1916,7 +1923,7 @@ async def start_hosted_coordinator(
             stop_hosted_coordinator()
         else:
             return True
-    state_path = hosted_state_path(cluster_id)
+    state_path = hosted_state_path(cluster_id, port)
     if state_path.exists():
         state_path.unlink()
     coordinator_process = subprocess.Popen(
@@ -1941,6 +1948,19 @@ async def start_hosted_coordinator(
     if not await wait_for_coordinator(port, cluster_id):
         if coordinator_process.poll() is None:
             coordinator_process.terminate()
+        return False
+    if coordinator_process.poll() is not None:
+        return False
+    token_error = await validate_coordinator_token(f"http://127.0.0.1:{port}", cluster_id, token)
+    if token_error:
+        if coordinator_process.poll() is None:
+            coordinator_process.terminate()
+        if status_message:
+            status_message.content = (
+                "Coordinator answered locally, but it did not accept the new token. "
+                "An old coordinator may still be running on that port."
+            )
+            await status_message.update()
         return False
     if status_message:
         status_message.content = f"Coordinator is running locally on port `{port}`."
