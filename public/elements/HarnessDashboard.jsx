@@ -6,7 +6,9 @@ import {
   Cpu,
   GitBranch,
   ListChecks,
+  LogOut,
   Network,
+  Power,
   RadioTower,
   RefreshCw,
   RotateCw,
@@ -79,6 +81,49 @@ function Stat({ label, value }) {
       <div className="mt-1 truncate text-sm font-semibold">{value}</div>
     </div>
   );
+}
+
+function SessionStatus({ overview }) {
+  if (overview.hosting_live) {
+    return (
+      <div className="rounded-md border border-emerald-500/50 bg-emerald-500/10 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold">Hosting live</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              This machine is the coordinator host for the current chat session.
+            </p>
+          </div>
+          <Badge variant="outline">{overview.host_port || "live"}</Badge>
+        </div>
+        {(overview.host_urls || []).length > 0 && (
+          <div className="mt-3 grid gap-1 text-[11px] text-muted-foreground">
+            {(overview.host_urls || []).slice(0, 2).map((url) => (
+              <div key={url} className="truncate rounded bg-background/70 px-2 py-1">
+                {url}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (overview.connected_to_http) {
+    return (
+      <div className="rounded-md border border-sky-500/50 bg-sky-500/10 p-3">
+        <div className="text-sm font-semibold">Connected to coordinator</div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          This session is joined to a hosted coordinator, so hosting is locked for this chat.
+        </p>
+        {overview.coordinator_url && (
+          <div className="mt-3 truncate rounded bg-background/70 px-2 py-1 text-[11px] text-muted-foreground">
+            {overview.coordinator_url}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return null;
 }
 
 function FlowCard({ title, body, accent }) {
@@ -159,6 +204,7 @@ export default function HarnessDashboard() {
           <Stat label="Workspace" value={workspace.name || "default"} />
           <Stat label="Coordination" value={overview.coordination_backend || "file"} />
         </div>
+        <SessionStatus overview={overview} />
       </section>
 
       <section className="space-y-2">
@@ -288,9 +334,15 @@ export default function HarnessDashboard() {
       </section>
 
       <section className="grid grid-cols-2 gap-2">
-        <Button variant="outline" onClick={() => action("host_coordinator")}>
-          <RadioTower className="mr-2 h-4 w-4" /> Host
-        </Button>
+        {overview.hosting_live ? (
+          <Button variant="destructive" onClick={() => action("end_host")}>
+            <Power className="mr-2 h-4 w-4" /> End Host
+          </Button>
+        ) : (
+          <Button variant="outline" disabled={!overview.can_host} onClick={() => action("host_coordinator")}>
+            <RadioTower className="mr-2 h-4 w-4" /> {overview.connected_to_http ? "Hosting locked" : "Host"}
+          </Button>
+        )}
         <Button variant="outline" onClick={() => action("configure_http")}>
           <Network className="mr-2 h-4 w-4" /> Connect
         </Button>
@@ -303,6 +355,11 @@ export default function HarnessDashboard() {
         <Button variant="outline" onClick={() => action("restart_app")}>
           <RotateCw className="mr-2 h-4 w-4" /> Restart
         </Button>
+        {overview.connected_to_http && !overview.hosting_live && (
+          <Button variant="outline" onClick={() => action("end_session")}>
+            <LogOut className="mr-2 h-4 w-4" /> End Session
+          </Button>
+        )}
       </section>
     </div>
   );

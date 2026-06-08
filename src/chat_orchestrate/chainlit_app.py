@@ -80,6 +80,10 @@ def stop_hosted_coordinator() -> None:
     coordinator_process = None
 
 
+def is_hosting_live() -> bool:
+    return bool(coordinator_process and coordinator_process.poll() is None)
+
+
 def stop_ui_worker() -> None:
     global ui_worker_task
     if ui_worker_task and not ui_worker_task.done():
@@ -1065,6 +1069,16 @@ async def configure_http_connection() -> None:
 
 async def host_coordinator() -> None:
     global coordinator_process, hosted_connection
+    if settings.coordination_backend.lower().strip() == "http" and not is_hosting_live():
+        await cl.Message(
+            content=(
+                "This chat is already connected to a coordinator, so it cannot host another coordinator in "
+                "the same session. Use **End Session** first, or start a separate chat/session if this "
+                "machine should host a different cluster."
+            )
+        ).send()
+        await show_dashboard_sidebar()
+        return
     if coordinator_process and coordinator_process.poll() is None:
         await cl.Message(
             content=(
@@ -1126,6 +1140,7 @@ async def host_coordinator() -> None:
     except CoordinationError:
         pass
     await cl.Message(content=hosted_coordinator_message(cluster_id, token, port)).send()
+    await show_dashboard_sidebar()
 
 
 async def configure_file_connection() -> None:
@@ -1158,6 +1173,7 @@ async def configure_file_connection() -> None:
 async def end_session() -> None:
     global hosted_connection
     stop_hosted_coordinator()
+    clear_hosted_state_files()
     hosted_connection = {}
     clear_runtime_env()
     apply_local_file_connection()
@@ -1168,6 +1184,25 @@ async def end_session() -> None:
             f"Removed: `{RUNTIME_CONFIG_PATH}`\n\n"
             "This UI is back on local file coordination. Other machines should also use **End Session** "
             "if they were connected with the old token."
+        )
+    ).send()
+    await update_cluster_roster()
+
+
+async def end_host() -> None:
+    global hosted_connection
+    was_hosting = is_hosting_live()
+    stop_hosted_coordinator()
+    clear_hosted_state_files()
+    hosted_connection = {}
+    clear_runtime_env()
+    apply_local_file_connection()
+    await cl.Message(
+        content=(
+            "## Host Ended\n\n"
+            f"{'Stopped the hosted coordinator' if was_hosting else 'No live hosted coordinator process was attached to this UI'}, "
+            "removed hosted machine state for this cluster, and wiped the saved coordinator URL/token for this session.\n\n"
+            "Connected machines should use **End Session** or reconnect with a fresh connection pack."
         )
     ).send()
     await update_cluster_roster()
@@ -1284,6 +1319,11 @@ async def configure_file_action(_: cl.Action) -> None:
 @cl.action_callback("end_session")
 async def end_session_action(_: cl.Action) -> None:
     await end_session()
+
+
+@cl.action_callback("end_host")
+async def end_host_action(_: cl.Action) -> None:
+    await end_host()
 
 
 @cl.action_callback("clear_history")
@@ -1468,6 +1508,11 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         last_goal,
     )
     online_count = sum(1 for machine in machines if _machine_status(machine) == "online")
+    hosting_live = is_hosting_live()
+    connected_to_http = settings.coordination_backend.lower().strip() == "http"
+    can_host = not connected_to_http or hosting_live
+    host_port = hosted_connection.get("port") or str(settings.coordinator_port if hosting_live else "")
+    coordinator_urls = local_coordinator_urls(int(host_port)) if hosting_live and host_port.isdigit() else []
     return {
         "overview": {
             "cluster_id": settings.cluster_id,
@@ -1477,6 +1522,13 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "local_backend": local_chat_backend_label(),
             "online_count": online_count,
             "stale_count": len(machines) - online_count,
+            "hosting_live": hosting_live,
+            "connected_to_http": connected_to_http,
+            "can_host": can_host,
+            "host_port": host_port,
+            "coordinator_url": coordination.http_url or settings.coordination_http_url,
+            "host_urls": coordinator_urls,
+            "token_set": bool(settings.coordination_token),
         },
         "workspace": {
             "name": project.name if project else "default",
@@ -1844,6 +1896,20 @@ def local_coordinator_urls(port: int) -> list[str]:
 def hosted_state_path(cluster_id: str, port: int) -> Path:
     safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in cluster_id)
     return Path(".tmp") / f"hosted-coordinator-{safe or 'cluster'}-{port}.json"
+
+
+def clear_hosted_state_files() -> None:
+    safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in settings.cluster_id)
+    patterns = [
+        f"hosted-coordinator-{safe or 'cluster'}*.json",
+        "hosted-coordinator-cluster*.json",
+    ]
+    for pattern in patterns:
+        for path in Path(".tmp").glob(pattern):
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 def hosted_coordinator_message(cluster_id: str, token: str, port: int) -> str:
