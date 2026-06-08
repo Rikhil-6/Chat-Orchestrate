@@ -86,16 +86,21 @@ class Orchestrator:
         )
 
         if self.coordination is not None:
+            yield ProgressUpdate(
+                message="Confirming live orchestrator and machine roster before role routing.",
+                phase="coordinator-check",
+                role="coordinator",
+            )
             orchestrator_node = self.coordination.get_or_elect_orchestrator()
             run.orchestrator_machine = orchestrator_node.machine_id
             roles = infer_goal_roles(goal)
-            machines = self.coordination.list_machines()
             yield ProgressUpdate(
                 message="Asking the coordinator agent to reason over the machine roster before assigning roles.",
                 phase="routing",
                 role="coordinator",
                 assigned_machine=orchestrator_node.machine_id,
             )
+            machines = self.coordination.list_machines()
             machine_preferences, planned_roles = await self._reasoned_machine_preferences(goal, project, roles, machines)
             roles = planned_roles or roles
             run.delegated_tasks = self.coordination.plan_delegation(

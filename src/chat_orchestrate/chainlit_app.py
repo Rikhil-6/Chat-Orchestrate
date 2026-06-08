@@ -199,13 +199,33 @@ async def on_message(message: cl.Message) -> None:
     if not await ensure_selected_backend_ready(selected_backend):
         return
 
+    progress_items: dict[str, str] = {
+        "preflight:start": "- `intake` Preparing the coordinator and live machine roster."
+    }
+    progress_message = cl.Message(content=render_progress(progress_items))
+    await progress_message.send()
     try:
-        coordination.heartbeat()
-        coordination.get_or_elect_orchestrator()
+        await run_status_call(
+            "preflight:heartbeat",
+            "coordinator-check",
+            "Contacting the shared coordinator and refreshing this machine heartbeat.",
+            coordination.heartbeat,
+            progress_items,
+            progress_message,
+        )
+        await run_status_call(
+            "preflight:election",
+            "orchestrator-check",
+            "Confirming which machine currently owns orchestration.",
+            coordination.get_or_elect_orchestrator,
+            progress_items,
+            progress_message,
+        )
     except CoordinationError as exc:
-        await cl.Message(content=f"Coordination error: {exc}").send()
+        progress_items["preflight:error"] = f"- `error` Coordination error before the run could start: `{exc}`"
+        progress_message.content = render_progress(progress_items)
+        await progress_message.update()
         return
-    await update_cluster_roster()
 
     turn_agent_names = infer_goal_roles(text)
     turn_orchestrator = Orchestrator(
@@ -221,9 +241,6 @@ async def on_message(message: cl.Message) -> None:
     )
     turns = []
     final_run = None
-    progress_items: dict[str, str] = {}
-    progress_message = cl.Message(content="Starting coordination...")
-    await progress_message.send()
     async for event in turn_orchestrator.run(text, project):
         if isinstance(event, ProgressUpdate):
             progress_items[progress_key(event)] = progress_line(event)
@@ -336,6 +353,37 @@ def progress_line(update: ProgressUpdate) -> str:
         tags.append(f"`{update.role}`")
     prefix = f"- {' '.join(tags)} " if tags else "- "
     return prefix + update.message
+
+
+async def run_status_call(
+    key: str,
+    phase: str,
+    message: str,
+    func,
+    progress_items: dict[str, str],
+    progress_message: cl.Message,
+):
+    progress_items[key] = f"- `{phase}` {message}"
+    progress_message.content = render_progress(progress_items)
+    await progress_message.update()
+    task = asyncio.create_task(asyncio.to_thread(func))
+    tick = 0
+    while not task.done():
+        await asyncio.sleep(2)
+        if task.done():
+            break
+        tick += 1
+        progress_items[key] = (
+            f"- `{phase}` {message} Still waiting on coordinator I/O; "
+            f"attempt `{tick}`."
+        )
+        progress_message.content = render_progress(progress_items)
+        await progress_message.update()
+    result = await task
+    progress_items[key] = f"- `{phase}` {message} Done."
+    progress_message.content = render_progress(progress_items)
+    await progress_message.update()
+    return result
 
 
 def progress_key(update: ProgressUpdate) -> str:
@@ -2156,7 +2204,7 @@ def parse_connection_input(text: str) -> dict[str, object]:
 
 async def fetch_coordinator_health(
     urls: list[str],
-    timeout_seconds: float = 25.0,
+    timeout_seconds: float = 12.0,
     status_message: cl.Message | None = None,
 ) -> tuple[str, str] | None:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
@@ -2165,8 +2213,17 @@ async def fetch_coordinator_health(
     while asyncio.get_running_loop().time() < deadline:
         for url in urls:
             attempts += 1
+            if status_message:
+                remaining = max(0, int(deadline - asyncio.get_running_loop().time()))
+                status_message.content = (
+                    "Checking coordinator reachability...\n\n"
+                    f"Trying: `{url}/health`  \n"
+                    f"Attempt: `{attempts}`  \n"
+                    f"Time left: `{remaining}s`"
+                )
+                await status_message.update()
             try:
-                response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=3, trust_env=False)
+                response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=1.5, trust_env=False)
                 if response.status_code == 200:
                     if status_message:
                         status_message.content = f"Coordinator reachable at `{url}`."
@@ -2186,7 +2243,7 @@ async def fetch_coordinator_health(
                 f"Time left: `{remaining}s`"
             )
             await status_message.update()
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
     return None
 
 
@@ -2227,7 +2284,7 @@ def coordinator_reachability_help(urls: list[str]) -> str:
     url_lines = "\n".join(f"- `{url}/health`" for url in urls)
     return (
         "## Coordinator Not Reachable Yet\n\n"
-        "I retried for about 25 seconds and still could not reach the coordinator.\n\n"
+        "I retried for about 12 seconds and still could not reach the coordinator.\n\n"
         "Try opening this from the connecting machine's browser:\n\n"
         f"{url_lines}\n\n"
         "If it does not load, check:\n\n"
