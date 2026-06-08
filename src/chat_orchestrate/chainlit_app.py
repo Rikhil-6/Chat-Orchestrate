@@ -357,21 +357,6 @@ async def show_spaces() -> None:
 async def setup_chat_settings(selected_backend: str | None = None) -> None:
     preferences = load_preferences()
     credentials = load_credentials()
-    backend_values = [
-        "Select",
-        CODEX_BACKEND,
-        CLAUDE_CODE_BACKEND,
-        OPEN_SWARM_BACKEND,
-        SIMULATED_BACKEND,
-        *agent_backends,
-    ]
-    unique_backend_values = []
-    for backend in backend_values:
-        if backend not in unique_backend_values:
-            unique_backend_values.append(backend)
-    selected_backend = selected_backend or preferences.get("agent_backend", "Select")
-    if selected_backend not in unique_backend_values:
-        selected_backend = "Select"
     restore_history = preferences.get("restore_history", "true").lower() != "false"
     codex_credentials = credentials.get(CODEX_BACKEND, {})
     claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
@@ -387,8 +372,31 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
             claude_credentials.get("claude_command", preferences.get("claude_command", settings.claude_command))
         ),
     )
-    codex_initial = codex_command or command_for_backend(CODEX_BACKEND, settings.command_overrides) or ""
-    claude_initial = claude_command or command_for_backend(CLAUDE_CODE_BACKEND, settings.command_overrides) or ""
+    command_overrides = {
+        CODEX_BACKEND: codex_command,
+        CLAUDE_CODE_BACKEND: claude_command,
+    }
+    detected_backends = detect_agent_backends(settings.configured_backends, command_overrides)
+    backend_values = [
+        "auto",
+        CODEX_BACKEND,
+        CLAUDE_CODE_BACKEND,
+        OPEN_SWARM_BACKEND,
+        SIMULATED_BACKEND,
+        *detected_backends,
+        *agent_backends,
+    ]
+    unique_backend_values = []
+    for backend in backend_values:
+        if backend not in unique_backend_values:
+            unique_backend_values.append(backend)
+    selected_backend = resolve_settings_backend(
+        selected_backend or preferences.get("agent_backend", "auto"),
+        unique_backend_values,
+        command_overrides,
+    )
+    codex_initial = codex_command or command_for_backend(CODEX_BACKEND, command_overrides) or ""
+    claude_initial = claude_command or command_for_backend(CLAUDE_CODE_BACKEND, command_overrides) or ""
     cl.user_session.set("agent_backend", selected_backend)
     cl.user_session.set("restore_history", restore_history)
     cl.user_session.set("openai_api_key", openai_api_key)
@@ -406,8 +414,8 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
             id="agent_backend",
             label="Local Agent",
             values=unique_backend_values,
-            initial=selected_backend,
-            tooltip="Choose which locally installed agent should power this machine.",
+            initial_value=selected_backend,
+            tooltip="Auto selects the first callable local agent detected on this machine.",
         ),
         Switch(
             id="restore_history",
@@ -419,20 +427,20 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
     if selected_backend == CODEX_BACKEND:
         widgets.extend(
             [
-            TextInput(
-                id="openai_api_key",
-                label="OpenAI API Key",
-                initial=openai_api_key,
+                TextInput(
+                    id="openai_api_key",
+                    label="OpenAI API Key",
+                    initial=openai_api_key,
                     placeholder="Saved locally; used for Codex API fallback",
                     tooltip="Saved locally in ignored ui_state.json for this machine.",
-            ),
-            TextInput(
-                id="codex_command",
-                label="Codex Command",
-                initial=codex_initial,
-                placeholder="codex, codex.cmd, or full path",
+                ),
+                TextInput(
+                    id="codex_command",
+                    label="Codex Command",
+                    initial=codex_initial,
+                    placeholder="codex, codex.cmd, or full path",
                     tooltip="Optional local Codex CLI command. API fallback is used if this is blank or unavailable.",
-            ),
+                ),
             ]
         )
     elif selected_backend == CLAUDE_CODE_BACKEND:
@@ -503,7 +511,37 @@ def refresh_advertised_backends(selected_backend: str = "auto", goal: str = "") 
 
 
 def normalize_selected_backend(backend: str) -> str:
-    return "auto" if backend == "Select" else backend
+    clean = str(backend or "").strip()
+    return "auto" if clean in {"", "Select", "Auto"} else clean
+
+
+def resolve_settings_backend(
+    requested_backend: str,
+    available_values: list[str],
+    command_overrides: dict[str, str] | None = None,
+) -> str:
+    requested = normalize_selected_backend(requested_backend)
+    if requested != "auto" and requested in available_values:
+        return requested
+
+    for backend in [CODEX_BACKEND, CLAUDE_CODE_BACKEND, OPEN_SWARM_BACKEND]:
+        if backend in available_values and backend_is_callable_with_overrides(backend, command_overrides):
+            return backend
+    if SIMULATED_BACKEND in available_values:
+        return SIMULATED_BACKEND
+    return "auto"
+
+
+def backend_is_callable_with_overrides(backend: str, command_overrides: dict[str, str] | None = None) -> bool:
+    if backend in {"auto", "Select", SIMULATED_BACKEND}:
+        return True
+    if command_for_backend(backend, command_overrides):
+        return True
+    if backend == CODEX_BACKEND and load_openai_api_key():
+        return True
+    if backend == OPEN_SWARM_BACKEND:
+        return bool(settings.open_swarm_base_url.strip())
+    return False
 
 
 async def ensure_selected_backend_ready(selected_backend: str) -> bool:
@@ -518,16 +556,7 @@ async def ensure_selected_backend_ready(selected_backend: str) -> bool:
 
 
 def backend_is_callable(backend: str) -> bool:
-    if backend in {"auto", "Select", SIMULATED_BACKEND}:
-        return True
-    command_overrides = load_command_overrides()
-    if command_for_backend(backend, command_overrides):
-        return True
-    if backend == CODEX_BACKEND and load_openai_api_key():
-        return True
-    if backend == OPEN_SWARM_BACKEND:
-        return bool(settings.open_swarm_base_url.strip())
-    return False
+    return backend_is_callable_with_overrides(backend, load_command_overrides())
 
 
 def backend_setup_needed_cards(backend: str) -> str:
@@ -618,9 +647,19 @@ async def auto_detect_agents() -> None:
         credential_updates.append(f"- Claude Code CLI: `{command}`")
     if preferences:
         save_preferences(preferences)
-    selected_backend = normalize_selected_backend(str(cl.user_session.get("agent_backend") or "auto"))
+    selected_backend = resolve_settings_backend(
+        str(cl.user_session.get("agent_backend") or "auto"),
+        ["auto", CODEX_BACKEND, CLAUDE_CODE_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND],
+        {
+            CODEX_BACKEND: str(cl.user_session.get("codex_command") or preferences.get("codex_command", "")),
+            CLAUDE_CODE_BACKEND: str(cl.user_session.get("claude_command") or preferences.get("claude_command", "")),
+        },
+    )
+    if selected_backend != "auto":
+        cl.user_session.set("agent_backend", selected_backend)
+        save_preferences({"agent_backend": selected_backend})
     refresh_advertised_backends(selected_backend, str(cl.user_session.get("last_goal") or ""))
-    await setup_chat_settings(selected_backend if selected_backend != "auto" else "Select")
+    await setup_chat_settings(selected_backend)
     await show_dashboard_sidebar()
     if credential_updates:
         await cl.Message(
