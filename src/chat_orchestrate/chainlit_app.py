@@ -48,8 +48,12 @@ from chat_orchestrate.ui_state import (
 )
 
 settings = get_settings()
-agent_backends = detect_agent_backends(settings.configured_backends, settings.command_overrides)
-agent_roles = infer_machine_capabilities(agent_backends, defaults=settings.default_agents)
+agent_backends = [
+    backend
+    for backend in detect_agent_backends(settings.configured_backends, settings.command_overrides)
+    if backend != SIMULATED_BACKEND
+]
+agent_roles = []
 spaces = ProjectSpaceManager(settings.workspaces_root, settings.workspace_state_path)
 coordination = CoordinationManager(
     settings.coordination_state_path,
@@ -132,6 +136,9 @@ async def ui_worker_loop() -> None:
 
 @cl.on_chat_start
 async def on_chat_start() -> None:
+    cl.user_session.set("last_goal", "")
+    cl.user_session.set("last_run", None)
+    refresh_advertised_backends(selected_chat_backend(), "")
     try:
         local_node = coordination.heartbeat()
         orchestrator_node = coordination.get_or_elect_orchestrator()
@@ -537,18 +544,7 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
 def refresh_advertised_backends(selected_backend: str = "auto", goal: str = "") -> None:
     global agent_backends, agent_roles
     detected = detect_agent_backends(settings.configured_backends, load_command_overrides())
-    advertised = []
-    for backend in [*detected, normalize_selected_backend(selected_backend)]:
-        if (
-            backend
-            and backend != "auto"
-            and backend != "Select"
-            and backend_is_callable(backend)
-            and backend not in advertised
-        ):
-            advertised.append(backend)
-    if not advertised:
-        advertised = [SIMULATED_BACKEND]
+    advertised = advertised_backends(detected, selected_backend, goal)
     roles = infer_machine_capabilities(
         advertised,
         normalize_selected_backend(selected_backend),
@@ -559,6 +555,23 @@ def refresh_advertised_backends(selected_backend: str = "auto", goal: str = "") 
     agent_roles = roles
     coordination.agent_backends = advertised
     coordination.agent_roles = roles
+
+
+def advertised_backends(detected: list[str], selected_backend: str = "auto", goal: str = "") -> list[str]:
+    selected = normalize_selected_backend(selected_backend)
+    if selected != "auto" and selected != SIMULATED_BACKEND and backend_is_callable(selected):
+        return [selected]
+    if selected == SIMULATED_BACKEND:
+        return [SIMULATED_BACKEND] if goal.strip() else []
+
+    real = [
+        backend
+        for backend in detected
+        if backend != SIMULATED_BACKEND and backend_is_callable(backend)
+    ]
+    if real:
+        return real
+    return [SIMULATED_BACKEND] if goal.strip() else []
 
 
 def normalize_selected_backend(backend: str) -> str:
@@ -1378,9 +1391,9 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         },
         "repo": {
             "has_goal": bool(last_goal),
-            "worker_outputs": "Generated after the next task: branches, patches, preview URLs, screenshots",
-            "canonical": "Selected after workspace mode and task scope are known",
-            "merge": "Coordinator proposes the merge path after workers return outputs",
+            "worker_outputs": "waiting for task",
+            "canonical": "waiting for workspace decision",
+            "merge": "waiting for worker outputs",
         },
         "run": dashboard_run_props(),
         "machines": [machine_dashboard_props(machine) for machine in machines],
@@ -1403,10 +1416,18 @@ def machine_dashboard_props(machine: MachineNode) -> dict:
 
 def dashboard_run_props() -> dict:
     run = cl.user_session.get("last_run")
+    if not run:
+        return {
+            "run_id": "",
+            "goal": "",
+            "orchestrator_machine": "",
+            "turns": [],
+            "tasks": [],
+        }
     tasks = recent_dashboard_tasks(getattr(run, "run_id", ""))
     return {
         "run_id": getattr(run, "run_id", ""),
-        "goal": getattr(run, "goal", str(cl.user_session.get("last_goal") or "")),
+        "goal": getattr(run, "goal", ""),
         "orchestrator_machine": getattr(run, "orchestrator_machine", ""),
         "turns": [
             {
@@ -1423,6 +1444,8 @@ def dashboard_run_props() -> dict:
 
 
 def recent_dashboard_tasks(run_id: str) -> list[dict]:
+    if not run_id:
+        return []
     try:
         tasks = coordination.list_tasks()
     except CoordinationError:

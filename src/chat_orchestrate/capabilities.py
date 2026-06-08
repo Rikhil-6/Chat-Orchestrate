@@ -1,17 +1,5 @@
 from __future__ import annotations
 
-from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND
-
-
-BASE_CAPABILITIES = ["coordinator", "researcher", "engineer", "reviewer", "documenter"]
-
-BACKEND_CAPABILITIES = {
-    CODEX_BACKEND: ["engineer", "backend", "frontend", "reviewer", "documenter"],
-    CLAUDE_CODE_BACKEND: ["coordinator", "researcher", "engineer", "frontend", "reviewer", "documenter"],
-    OPEN_SWARM_BACKEND: ["coordinator", "researcher", "engineer", "backend", "frontend", "reviewer", "documenter"],
-    SIMULATED_BACKEND: ["researcher", "reviewer", "documenter"],
-}
-
 ROLE_KEYWORDS = {
     "backend": ["backend", "back-end", "api", "server", "database", "auth", "endpoint"],
     "frontend": ["frontend", "front-end", "ui", "website", "page", "browser", "css", "react"],
@@ -47,17 +35,11 @@ def infer_machine_capabilities(
     goal: str = "",
 ) -> list[str]:
     """Infer what a machine should advertise from selected agent, installed agents, and current goal."""
-    normalized = unique([backend for backend in [selected_backend, *backends] if _usable_backend(backend)])
-    if not normalized:
-        normalized = [SIMULATED_BACKEND]
+    if not goal.strip():
+        return []
 
-    capabilities = ["coordinator"]
-    for backend in normalized:
-        capabilities.extend(BACKEND_CAPABILITIES.get(backend, []))
-    capabilities.extend(role for role in infer_goal_roles(goal) if role in {"backend", "frontend"})
-    if defaults:
-        capabilities.extend(defaults)
-    return unique(capabilities)
+    goal_roles = infer_goal_roles(goal)
+    return unique(goal_roles)
 
 
 def capability_policy_summary(backends: list[str], selected_backend: str, goal: str) -> list[str]:
@@ -77,10 +59,6 @@ def unique(items: list[str]) -> list[str]:
         if clean and clean not in result:
             result.append(clean)
     return result
-
-
-def _usable_backend(backend: str) -> bool:
-    return backend not in {"", "auto", "Select"}
 
 
 def _looks_like_work_request(goal: str) -> bool:

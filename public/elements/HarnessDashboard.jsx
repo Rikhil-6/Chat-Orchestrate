@@ -42,21 +42,29 @@ function MachineCard({ machine, orchestratorId }) {
           <div className="text-right font-medium">{machine.seen_seconds}s ago</div>
         </div>
         <div className="flex flex-wrap gap-1.5">
-          {(machine.agent_backends || []).map((backend) => (
-            <Badge key={backend} variant="outline" className="text-[11px]">
-              {backend}
-            </Badge>
-          ))}
+          {(machine.agent_backends || []).length > 0 ? (
+            (machine.agent_backends || []).map((backend) => (
+              <Badge key={backend} variant="outline" className="text-[11px]">
+                {backend}
+              </Badge>
+            ))
+          ) : (
+            <span className="text-[11px] text-muted-foreground">Agent backend advertises after selection</span>
+          )}
         </div>
         <div className="flex flex-wrap gap-1.5">
-          {(machine.capabilities || []).slice(0, 8).map((capability) => (
-            <span
-              key={capability}
-              className="rounded-full bg-muted px-2 py-1 text-[11px] text-muted-foreground"
-            >
-              {capability}
-            </span>
-          ))}
+          {(machine.capabilities || []).length > 0 ? (
+            (machine.capabilities || []).slice(0, 8).map((capability) => (
+              <span
+                key={capability}
+                className="rounded-full bg-muted px-2 py-1 text-[11px] text-muted-foreground"
+              >
+                {capability}
+              </span>
+            ))
+          ) : (
+            <span className="text-[11px] text-muted-foreground">Role tags appear after a chat goal</span>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -167,7 +175,9 @@ export default function HarnessDashboard() {
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-muted-foreground">Advertised tags</span>
-              <strong className="text-right">{(policy.capabilities || []).slice(0, 5).join(", ")}</strong>
+              <strong className="text-right">
+                {(policy.capabilities || []).length ? (policy.capabilities || []).slice(0, 5).join(", ") : "waiting for task"}
+              </strong>
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-muted-foreground">Goal roles</span>
