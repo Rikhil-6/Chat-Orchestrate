@@ -335,6 +335,7 @@ class CoordinationManager:
                         headers=self._http_headers(),
                         params={"cluster_id": self.cluster_id},
                         timeout=8,
+                        trust_env=False,
                     )
                 else:
                     response = httpx.put(
@@ -343,6 +344,7 @@ class CoordinationManager:
                         params={"cluster_id": self.cluster_id},
                         json=state,
                         timeout=8,
+                        trust_env=False,
                     )
                 if response.status_code in {401, 403}:
                     raise CoordinationError(

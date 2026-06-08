@@ -1,7 +1,7 @@
 (() => {
   const railId = "chat-orchestrate-panel-rail";
   const styleId = "chat-orchestrate-panel-rail-style";
-  const railVersion = "panel-rail-8";
+  const railVersion = "panel-rail-9";
 
   if (window.__chatOrchestratePanelRailVersion === railVersion) return;
   window.__chatOrchestratePanelRailVersion = railVersion;
@@ -22,22 +22,21 @@
       #${railId} {
         position: fixed;
         z-index: 2147483000;
-        left: 50%;
-        top: 72px;
-        transform: translateX(-50%);
+        right: 148px;
+        top: 12px;
         display: flex;
         gap: 4px;
         border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
         border-radius: 10px;
         padding: 4px;
         background: color-mix(in srgb, Canvas 88%, transparent);
-        box-shadow: 0 10px 34px color-mix(in srgb, black 20%, transparent);
+        box-shadow: 0 8px 24px color-mix(in srgb, black 16%, transparent);
         backdrop-filter: blur(14px);
         pointer-events: auto;
       }
       #${railId} button {
-        width: 112px;
-        min-height: 32px;
+        width: 92px;
+        min-height: 30px;
         border: 0;
         border-radius: 7px;
         padding: 7px 10px;
@@ -65,12 +64,11 @@
       }
       @media (max-width: 720px) {
         #${railId} {
-          left: 50%;
-          top: auto;
-          bottom: 84px;
+          right: 12px;
+          top: 52px;
         }
         #${railId} button {
-          width: 104px;
+          width: 86px;
           overflow: hidden;
           white-space: nowrap;
         }

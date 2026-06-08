@@ -1724,7 +1724,7 @@ async def wait_for_coordinator(port: int, cluster_id: str, timeout_seconds: floa
         if coordinator_process and coordinator_process.poll() is not None:
             return False
         try:
-            response = await asyncio.to_thread(httpx.get, url, timeout=1.5)
+            response = await asyncio.to_thread(httpx.get, url, timeout=1.5, trust_env=False)
             if response.status_code == 200 and response.json().get("cluster_id") == cluster_id:
                 return True
         except (httpx.HTTPError, ValueError):
@@ -1778,7 +1778,7 @@ async def fetch_coordinator_health(
         for url in urls:
             attempts += 1
             try:
-                response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=3)
+                response = await asyncio.to_thread(httpx.get, f"{url}/health", timeout=3, trust_env=False)
                 if response.status_code == 200:
                     if status_message:
                         status_message.content = f"Coordinator reachable at `{url}`."
@@ -1810,6 +1810,7 @@ async def validate_coordinator_token(url: str, cluster_id: str, token: str) -> s
             headers={"Authorization": f"Bearer {token}"},
             params={"cluster_id": cluster_id},
             timeout=4,
+            trust_env=False,
         )
     except httpx.HTTPError as exc:
         return str(exc)
