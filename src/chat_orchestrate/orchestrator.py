@@ -81,6 +81,7 @@ class Orchestrator:
         delegation_context = ""
         yield ProgressUpdate(
             message=f"Reading the goal and preparing `{project.name}` coordination.",
+            phase="intake",
             role="coordinator",
         )
 
@@ -91,6 +92,7 @@ class Orchestrator:
             machines = self.coordination.list_machines()
             yield ProgressUpdate(
                 message="Asking the coordinator agent to reason over the machine roster before assigning roles.",
+                phase="routing",
                 role="coordinator",
                 assigned_machine=orchestrator_node.machine_id,
             )
@@ -107,6 +109,7 @@ class Orchestrator:
             delegation_context = self._delegation_context(run)
             yield ProgressUpdate(
                 message=self._planning_progress(run, machine_preferences),
+                phase="delegation",
                 role="coordinator",
                 assigned_machine=orchestrator_node.machine_id,
             )
@@ -137,6 +140,7 @@ class Orchestrator:
         run.final = self._summarize(run)
         yield ProgressUpdate(
             message="The run has enough agent output to answer; preparing the conversational summary.",
+            phase="synthesis",
             role="coordinator",
             assigned_machine=run.orchestrator_machine,
         )
@@ -267,6 +271,7 @@ class Orchestrator:
         if task is None:
             return ProgressUpdate(
                 message=f"{agent.name} is starting as {agent.role} on the local agent brain.",
+                phase="starting",
                 agent=agent.name,
                 role=agent.role,
                 assigned_machine=run.orchestrator_machine,
@@ -283,6 +288,7 @@ class Orchestrator:
             )
         return ProgressUpdate(
             message=message,
+            phase="assigned",
             agent=agent.name,
             role=task.role,
             assigned_machine=task.assigned_machine,
@@ -295,26 +301,30 @@ class Orchestrator:
         agent: AgentSpec,
         task: DelegatedTask | None,
         elapsed: int,
+        tick: int,
     ) -> ProgressUpdate:
+        phase, activity = self._wait_activity(agent, task, tick)
         if task is None:
             return ProgressUpdate(
-                message=f"{agent.name} is still working locally. Elapsed: {elapsed}s.",
+                message=f"{agent.name}: {activity} Elapsed: {elapsed}s.",
+                phase=phase,
                 agent=agent.name,
                 role=agent.role,
                 elapsed_seconds=elapsed,
             )
         if self.coordination is not None and task.assigned_machine != self.coordination.machine_id:
             message = (
-                f"Still waiting on `{task.assigned_machine}` for `{task.role}` "
+                f"{activity} Waiting on `{task.assigned_machine}` for `{task.role}` "
                 f"via `{task.preferred_backend}`. Elapsed: {elapsed}s."
             )
         else:
             message = (
-                f"{agent.name} is still working as `{task.role}` via `{task.preferred_backend}`. "
+                f"{agent.name}: {activity} Role `{task.role}` is running via `{task.preferred_backend}`. "
                 f"Elapsed: {elapsed}s."
             )
         return ProgressUpdate(
             message=message,
+            phase=phase,
             agent=agent.name,
             role=task.role,
             assigned_machine=task.assigned_machine,
@@ -322,6 +332,46 @@ class Orchestrator:
             task_id=task.task_id,
             elapsed_seconds=elapsed,
         )
+
+    def _wait_activity(self, agent: AgentSpec, task: DelegatedTask | None, tick: int) -> tuple[str, str]:
+        role = (task.role if task else agent.role).lower()
+        agent_name = agent.name.lower()
+        remote = bool(task and self.coordination is not None and task.assigned_machine != self.coordination.machine_id)
+        if remote:
+            activities = [
+                ("handoff", "Task is handed off; checking whether the remote worker has claimed it."),
+                ("remote-work", "Remote agent should be working its assigned slice now."),
+                ("artifact-check", "Watching for returned notes, code output, or failure details."),
+                ("routing-check", "Keeping the assignment live while the coordinator waits for a result."),
+            ]
+        elif role == "coordinator" or agent_name == "coordinator":
+            activities = [
+                ("routing", "Reading the user intent against the live machine roster."),
+                ("decomposition", "Separating project work into roles and dependencies."),
+                ("validation", "Checking that assignments line up with available machines and backends."),
+                ("synthesis", "Preparing the coordination summary without exposing private chain-of-thought."),
+            ]
+        elif role in {"backend", "frontend", "engineer"}:
+            activities = [
+                ("context", "Checking project scope and existing handoff context."),
+                ("implementation", "Working through the concrete build path for this role."),
+                ("artifact-plan", "Identifying files, commands, patches, or preview artifacts to return."),
+                ("handoff", "Shaping the result so the coordinator can merge it with other workstreams."),
+            ]
+        elif role == "reviewer":
+            activities = [
+                ("review", "Scanning for risks, regressions, and missing validation."),
+                ("test-plan", "Thinking through the most relevant checks for this change."),
+                ("handoff", "Condensing findings into coordinator-ready notes."),
+            ]
+        else:
+            activities = [
+                ("context", "Reading the role instructions and prior agent context."),
+                ("work", "Producing the assigned role output."),
+                ("handoff", "Formatting the result for the coordinator."),
+            ]
+        index = max(0, tick - 1) % len(activities)
+        return activities[index]
 
     async def _run_or_wait_for_agent(
         self,
@@ -355,12 +405,14 @@ class Orchestrator:
     ) -> AsyncIterator[ProgressUpdate | str]:
         work = asyncio.create_task(self._run_or_wait_for_agent(agent, project, goal, context, task))
         started = asyncio.get_running_loop().time()
+        tick = 0
         while not work.done():
             await asyncio.sleep(self.progress_interval_seconds)
             if work.done():
                 break
+            tick += 1
             elapsed = int(asyncio.get_running_loop().time() - started)
-            yield self._agent_wait_progress(agent, task, elapsed)
+            yield self._agent_wait_progress(agent, task, elapsed, tick)
         yield await work
 
     async def _wait_for_delegated_task(self, task: DelegatedTask) -> DelegatedTask | None:

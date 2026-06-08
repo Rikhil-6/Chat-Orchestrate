@@ -221,13 +221,13 @@ async def on_message(message: cl.Message) -> None:
     )
     turns = []
     final_run = None
-    progress_lines: list[str] = []
+    progress_items: dict[str, str] = {}
     progress_message = cl.Message(content="Starting coordination...")
     await progress_message.send()
     async for event in turn_orchestrator.run(text, project):
         if isinstance(event, ProgressUpdate):
-            progress_lines.append(progress_line(event))
-            progress_message.content = "## Coordination Status\n\n" + "\n".join(progress_lines[-6:])
+            progress_items[progress_key(event)] = progress_line(event)
+            progress_message.content = render_progress(progress_items)
             await progress_message.update()
             continue
         if isinstance(event, OrchestrationRun):
@@ -235,8 +235,8 @@ async def on_message(message: cl.Message) -> None:
             continue
 
         turns.append(event)
-        progress_lines.append(f"- {event.agent} finished its `{event.role}` pass.")
-        progress_message.content = "## Coordination Status\n\n" + "\n".join(progress_lines[-6:])
+        progress_items[f"done:{event.agent}:{event.role}"] = f"- `done` {event.agent} finished its `{event.role}` pass."
+        progress_message.content = render_progress(progress_items)
         await progress_message.update()
 
     if final_run:
@@ -326,6 +326,8 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
 
 def progress_line(update: ProgressUpdate) -> str:
     tags = []
+    if update.phase:
+        tags.append(f"`{update.phase}`")
     if update.assigned_machine:
         tags.append(f"`{update.assigned_machine}`")
     if update.preferred_backend:
@@ -334,6 +336,19 @@ def progress_line(update: ProgressUpdate) -> str:
         tags.append(f"`{update.role}`")
     prefix = f"- {' '.join(tags)} " if tags else "- "
     return prefix + update.message
+
+
+def progress_key(update: ProgressUpdate) -> str:
+    if update.task_id:
+        return f"task:{update.task_id}"
+    if update.role:
+        return f"role:{update.role}"
+    return f"phase:{update.phase}"
+
+
+def render_progress(items: dict[str, str]) -> str:
+    lines = list(items.values())[-8:]
+    return "## Coordination Status\n\n" + "\n".join(lines)
 
 
 def is_lightweight_chat(goal: str) -> bool:

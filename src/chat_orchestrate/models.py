@@ -33,6 +33,7 @@ class AgentTurn:
 @dataclass(frozen=True)
 class ProgressUpdate:
     message: str
+    phase: str = "working"
     agent: str | None = None
     role: str | None = None
     assigned_machine: str | None = None
