@@ -1,9 +1,12 @@
 (() => {
-  if (window.__chatOrchestratePanelRail) return;
-  window.__chatOrchestratePanelRail = true;
-
   const railId = "chat-orchestrate-panel-rail";
   const styleId = "chat-orchestrate-panel-rail-style";
+  const railVersion = "panel-rail-8";
+
+  if (window.__chatOrchestratePanelRailVersion === railVersion) return;
+  window.__chatOrchestratePanelRailVersion = railVersion;
+  document.getElementById(railId)?.remove();
+  document.getElementById(styleId)?.remove();
 
   function isVisible(element) {
     if (!element) return false;
@@ -19,35 +22,55 @@
       #${railId} {
         position: fixed;
         z-index: 2147483000;
-        left: 10px;
+        left: 50%;
         top: 72px;
+        transform: translateX(-50%);
         display: flex;
-        flex-direction: column;
-        gap: 8px;
+        gap: 4px;
+        border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+        border-radius: 10px;
+        padding: 4px;
+        background: color-mix(in srgb, Canvas 88%, transparent);
+        box-shadow: 0 10px 34px color-mix(in srgb, black 20%, transparent);
+        backdrop-filter: blur(14px);
         pointer-events: auto;
       }
       #${railId} button {
-        width: 116px;
-        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-        border-radius: 8px;
-        padding: 8px 10px;
-        background: color-mix(in srgb, Canvas 88%, transparent);
+        width: 112px;
+        min-height: 32px;
+        border: 0;
+        border-radius: 7px;
+        padding: 7px 10px;
+        background: transparent;
         color: CanvasText;
-        box-shadow: 0 8px 30px color-mix(in srgb, black 18%, transparent);
         cursor: pointer;
         font: 600 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        text-align: left;
+        text-align: center;
+        opacity: 0.78;
+        transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
       }
       #${railId} button:hover {
-        border-color: #ff0f68;
+        background: color-mix(in srgb, currentColor 9%, transparent);
+        opacity: 1;
+      }
+      #${railId} button[aria-pressed="true"] {
+        background: #ff0f68;
+        color: white;
+        opacity: 1;
+      }
+      .chat-orchestrate-panel-hidden {
+        display: none !important;
+        pointer-events: none !important;
+        visibility: hidden !important;
       }
       @media (max-width: 720px) {
         #${railId} {
+          left: 50%;
           top: auto;
-          bottom: 92px;
+          bottom: 84px;
         }
         #${railId} button {
-          width: 44px;
+          width: 104px;
           overflow: hidden;
           white-space: nowrap;
         }
@@ -64,6 +87,41 @@
         (button.textContent || "").trim().toLowerCase() === text.toLowerCase()
       );
     });
+  }
+
+  function visibleDialogs() {
+    return Array.from(document.querySelectorAll("[role='dialog']")).filter((dialog) => {
+      return isVisible(dialog) && !dialog.classList.contains("chat-orchestrate-panel-hidden");
+    });
+  }
+
+  function dashboardDialog(includeHidden = false) {
+    const dialog = document.querySelector("[data-harness-dashboard='true']")?.closest("[role='dialog']");
+    if (!dialog) return null;
+    return includeHidden || isVisible(dialog) ? dialog : null;
+  }
+
+  function settingsDialog(includeHidden = false) {
+    const dialogs = includeHidden ? Array.from(document.querySelectorAll("[role='dialog']")) : visibleDialogs();
+    return dialogs.find((dialog) => {
+      return (dialog.textContent || "").trim().startsWith("Settings panel");
+    });
+  }
+
+  function softHideDialog(dialog) {
+    if (!dialog) return false;
+    dialog.classList.add("chat-orchestrate-panel-hidden");
+    return true;
+  }
+
+  function showDialog(dialog) {
+    if (!dialog) return false;
+    dialog.classList.remove("chat-orchestrate-panel-hidden");
+    return true;
+  }
+
+  function closeDialog(dialog) {
+    return softHideDialog(dialog);
   }
 
   function submitCommand(command) {
@@ -92,21 +150,42 @@
     return true;
   }
 
-  function openDashboard() {
-    if (document.querySelector("[data-harness-dashboard='true']")) return;
+  function toggleDashboard() {
+    const existingDialog = dashboardDialog(true);
+    if (existingDialog && existingDialog.classList.contains("chat-orchestrate-panel-hidden")) {
+      showDialog(existingDialog);
+      updateRailState();
+      return;
+    }
+    const openDialog = dashboardDialog();
+    if (openDialog) {
+      closeDialog(openDialog);
+      updateRailState();
+      return;
+    }
     const dashboardButton = findTextButton("Dashboard");
     if (dashboardButton) {
       dashboardButton.click();
+      setTimeout(updateRailState, 200);
       return;
     }
     submitCommand("/dashboard");
+    setTimeout(updateRailState, 800);
   }
 
-  function openSettings() {
-    const settingsOpen = Array.from(document.querySelectorAll("[role='dialog']")).some((dialog) => {
-      return isVisible(dialog) && (dialog.textContent || "").trim().startsWith("Settings panel");
-    });
-    if (settingsOpen) return;
+  function toggleSettings() {
+    const existingDialog = settingsDialog(true);
+    if (existingDialog && existingDialog.classList.contains("chat-orchestrate-panel-hidden")) {
+      showDialog(existingDialog);
+      updateRailState();
+      return;
+    }
+    const openDialog = settingsDialog();
+    if (openDialog) {
+      closeDialog(openDialog);
+      updateRailState();
+      return;
+    }
 
     const topButtons = Array.from(document.querySelectorAll("button"))
       .filter(isVisible)
@@ -120,6 +199,28 @@
       ? iconButtons.filter((item) => item.rect.left < theme.rect.left).pop()
       : iconButtons.at(-1);
     settings?.button.click();
+    setTimeout(updateRailState, 200);
+  }
+
+  function updateRailState() {
+    const rail = document.getElementById(railId);
+    if (!rail) return;
+    const dashboard = rail.querySelector("[data-panel='dashboard']");
+    const settings = rail.querySelector("[data-panel='settings']");
+    dashboard?.setAttribute("aria-pressed", dashboardDialog() ? "true" : "false");
+    settings?.setAttribute("aria-pressed", settingsDialog() ? "true" : "false");
+  }
+
+  function bindRailButton(button, callback) {
+    button.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      callback();
+    });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
   }
 
   function ensureRail() {
@@ -130,21 +231,29 @@
 
     const dashboard = document.createElement("button");
     dashboard.type = "button";
+    dashboard.dataset.panel = "dashboard";
     dashboard.textContent = "Dashboard";
-    dashboard.title = "Open harness dashboard";
-    dashboard.addEventListener("click", openDashboard);
+    dashboard.title = "Toggle harness dashboard";
+    dashboard.setAttribute("aria-pressed", "false");
+    bindRailButton(dashboard, toggleDashboard);
 
     const settings = document.createElement("button");
     settings.type = "button";
+    settings.dataset.panel = "settings";
     settings.textContent = "Settings";
-    settings.title = "Open local agent settings";
-    settings.addEventListener("click", openSettings);
+    settings.title = "Toggle local agent settings";
+    settings.setAttribute("aria-pressed", "false");
+    bindRailButton(settings, toggleSettings);
 
     rail.append(dashboard, settings);
     document.body.appendChild(rail);
+    updateRailState();
   }
 
   ensureRail();
   window.addEventListener("load", ensureRail);
-  new MutationObserver(ensureRail).observe(document.documentElement, { childList: true, subtree: true });
+  new MutationObserver(() => {
+    ensureRail();
+    updateRailState();
+  }).observe(document.documentElement, { childList: true, subtree: true });
 })();

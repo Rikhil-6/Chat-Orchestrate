@@ -23,7 +23,7 @@ pip install open-swarm
 swarm-api
 ```
 
-With this split, Chainlit runs on `7860` and OpenSwarm can keep `8000`.
+With this split, Chainlit runs on `7862` and OpenSwarm can keep `8000`.
 
 ## GitHub-Friendly Folder Deployment
 

@@ -8,7 +8,7 @@ import secrets
 import socket
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import chainlit as cl
@@ -29,7 +29,7 @@ from chat_orchestrate.backends import (
     launch_backend_app,
     run_task,
 )
-from chat_orchestrate.capabilities import capability_policy_summary, infer_goal_roles, infer_machine_capabilities
+from chat_orchestrate.capabilities import infer_goal_roles, infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import MachineNode, OrchestrationRun
@@ -314,8 +314,6 @@ async def handle_command(text: str) -> None:
             await show_tasks()
         elif command == "/backends":
             await show_backends()
-        elif command == "/mock-cluster":
-            await show_mock_cluster()
         elif command == "/connect":
             await show_connection()
         elif command == "/host-coordinator":
@@ -815,54 +813,6 @@ async def show_backends() -> None:
     await cl.Message(content=backend_status_cards(), actions=machine_actions()).send()
 
 
-async def show_mock_cluster() -> None:
-    now = datetime.now(UTC)
-    mock_goal = "build a simple website: backend here, frontend on desktop-p4k08ab, then review and merge"
-    machines = [
-        MachineNode(
-            machine_id="sg-akc-dt330",
-            hostname="SG-AKC-DT330",
-            role="orchestrator",
-            status="online",
-            capabilities=infer_machine_capabilities([CODEX_BACKEND], CODEX_BACKEND, settings.default_agents, mock_goal),
-            agent_backends=[CODEX_BACKEND],
-            last_seen=now,
-        ),
-        MachineNode(
-            machine_id="desktop-p4k08ab",
-            hostname="DESKTOP-P4K08AB",
-            role="worker",
-            status="online",
-            capabilities=infer_machine_capabilities(
-                [CLAUDE_CODE_BACKEND],
-                CLAUDE_CODE_BACKEND,
-                settings.default_agents,
-                mock_goal,
-            ),
-            agent_backends=[CLAUDE_CODE_BACKEND],
-            last_seen=now - timedelta(seconds=6),
-        ),
-        MachineNode(
-            machine_id="maya-mbp",
-            hostname="MAYA-MBP",
-            role="worker",
-            status="online",
-            capabilities=infer_machine_capabilities(
-                [SIMULATED_BACKEND],
-                SIMULATED_BACKEND,
-                settings.default_agents,
-                mock_goal,
-            ),
-            agent_backends=[SIMULATED_BACKEND],
-            last_seen=now - timedelta(seconds=13),
-        ),
-    ]
-    await cl.Message(
-        content=mock_cluster_cards(machines),
-        actions=cluster_roster_actions(),
-    ).send()
-
-
 async def show_connection() -> None:
     await update_cluster_roster()
     await cl.Message(content=connection_cards(), actions=machine_actions()).send()
@@ -1125,11 +1075,6 @@ async def restart_app_action(_: cl.Action) -> None:
     await restart_app()
 
 
-@cl.action_callback("show_mock_cluster")
-async def show_mock_cluster_action(_: cl.Action) -> None:
-    await show_mock_cluster()
-
-
 @cl.action_callback("launch_codex_app")
 async def launch_codex_app_action(_: cl.Action) -> None:
     if launch_backend_app(CODEX_BACKEND):
@@ -1230,13 +1175,6 @@ def machine_actions() -> list[cl.Action]:
             label="Restart App",
             tooltip="Restart the local app when launched through scripts/run_local.py.",
             icon="rotate-cw",
-            payload={},
-        ),
-        cl.Action(
-            name="show_mock_cluster",
-            label="Mock Harness",
-            tooltip="Preview simulated multi-device agent coordination.",
-            icon="monitor-dot",
             payload={},
         ),
         cl.Action(
@@ -1418,77 +1356,6 @@ def cluster_roster_cards(machines, orchestrator_id: str) -> str:
     )
 
 
-def mock_cluster_cards(machines: list[MachineNode]) -> str:
-    goal = "build a simple website: backend here, frontend on desktop-p4k08ab, then review and merge"
-    rows = "\n".join(_format_mock_machine_card(machine, goal) for machine in machines)
-    return (
-        "## Distributed Agent Harness Mockup\n\n"
-        "> **Session** `friends-project`  \n"
-        "> **Workspace** `simple-website`  \n"
-        "> **Coordinator** `sg-akc-dt330`  \n"
-        f"> **Goal-derived policy** `{goal}`  \n"
-        "> **Task split** `backend -> sg-akc-dt330 / codex`, "
-        "`frontend -> desktop-p4k08ab / claude-code`, `review -> maya-mbp / simulated`\n\n"
-        f"{rows}\n"
-        "### Dynamic Policy\n\n"
-        "The capability tags are inferred from each machine's selected local agent, detected tools, "
-        "saved readiness, and the current chat goal. They should not be hand-maintained per machine.\n\n"
-        "### Repo Consolidation Model\n\n"
-        "1. **Canonical repo**: `origin/main` remains the shared source of truth.\n"
-        "2. **Worktree mode**: each machine works in a branch/worktree such as "
-        "`codex/backend-api` or `claude/frontend-ui`.\n"
-        "3. **Clone mode**: each machine works in its own clone, then returns a branch, patch, or PR.\n"
-        "4. **Preview bridge**: a frontend worker can publish a local preview URL or artifact link back "
-        "to the coordinator so backend-only machines can inspect the UI.\n"
-        "5. **Merge pass**: the coordinator pulls task outputs, runs tests, reviews conflicts, and merges "
-        "into the project workspace.\n\n"
-        "### Internal Flow\n\n"
-        "1. User picks a local agent in the sidebar on each machine.\n"
-        "2. The sidebar shows only that agent's credential/profile fields.\n"
-        "3. Credentials are saved locally in ignored `ui_state.json` on that machine.\n"
-        "4. Each machine heartbeats its selected backend and readiness to the coordinator.\n"
-        "5. The orchestrator delegates work to machines with matching roles and ready backends.\n"
-        "6. Task results include repo branch/patch/preview metadata, not only chat text.\n"
-    )
-
-
-def _format_mock_machine_card(machine: MachineNode, goal: str) -> str:
-    age = max(0, int((datetime.now(UTC) - machine.last_seen).total_seconds()))
-    backends = " ".join(f"`{backend}`" for backend in machine.agent_backends)
-    capabilities = " ".join(f"`{capability}`" for capability in machine.capabilities)
-    policy = " ".join(
-        f"`{item}`" for item in capability_policy_summary(machine.agent_backends, machine.agent_backends[0], goal)
-    )
-    credential_status = mock_credential_status(machine.agent_backends[0])
-    assignment = mock_assignment(machine.machine_id)
-    return (
-        f"> ### {machine.machine_id}\n"
-        f"> `{machine.status}` `{machine.role}` `seen {age}s ago`  \n"
-        f"> Host: `{machine.hostname}`  \n"
-        f"> Agent: {backends}  \n"
-        f"> Credentials: {credential_status}  \n"
-        f"> Policy: {policy}  \n"
-        f"> Capabilities: {capabilities}  \n"
-        f"> Assignment: {assignment}\n"
-    )
-
-
-def mock_credential_status(backend: str) -> str:
-    if backend == CODEX_BACKEND:
-        return "`saved OpenAI key` `CLI optional`"
-    if backend == CLAUDE_CODE_BACKEND:
-        return "`local Claude login` `command saved`"
-    return "`none required`"
-
-
-def mock_assignment(machine_id: str) -> str:
-    if machine_id == "sg-akc-dt330":
-        return "`backend API + coordinator plan`"
-    if machine_id == "desktop-p4k08ab":
-        return "`frontend build + browser check`"
-    return "`review notes + risk scan`"
-
-
 def _format_roster_row(machine, orchestrator_id: str) -> str:
     status = _machine_status(machine)
     role = "coordinator" if machine.machine_id == orchestrator_id else machine.role
@@ -1624,7 +1491,6 @@ def command_help() -> str:
         "- `/release-orchestrator`\n"
         "- `/tasks`\n"
         "- `/backends`\n"
-        "- `/mock-cluster`\n"
         "- `/connect`\n"
         "- `/host-coordinator`\n"
         "- `/connect-coordinator`\n"

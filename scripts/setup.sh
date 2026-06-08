@@ -23,3 +23,4 @@ fi
 
 printf '%s\n' "Setup complete."
 printf '%s\n' "Run the UI with: ./scripts/run_local.sh"
+printf '%s\n' "Then open: http://localhost:7862"

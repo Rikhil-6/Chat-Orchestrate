@@ -28,7 +28,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run Chainlit without the CLI event-loop patch.")
     parser.add_argument("target", help="Path to the Chainlit app file.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--port", type=int, default=7862)
     args = parser.parse_args()
 
     logging.basicConfig(

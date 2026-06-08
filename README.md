@@ -48,15 +48,15 @@ Then run your OpenSwarm API separately:
 swarm-api
 ```
 
-Open Chainlit at [http://localhost:7860](http://localhost:7860).
+Open Chainlit at [http://localhost:7862](http://localhost:7862).
 
 Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex` and `claude`; if neither is available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
 
-The Chainlit sidebar includes a **Local Agent** selector so you can choose `codex`, `claude-code`, `openswarm`, or `simulated` without editing `.env`. The sidebar updates to show only the credential/profile fields for that selected agent. The selected backend is advertised to the cluster, and chat turns use that local profile when it is ready. Codex can use a working CLI command or a saved `OPENAI_API_KEY` / sidebar **OpenAI API Key** for Responses API fallback. Claude Code uses its local command/login profile. Credentials are saved locally in ignored `ui_state.json`, so each computer keeps its own agent harness profile without committing secrets. The app can also detect the Microsoft Store Codex desktop app and offer **Launch Codex App** for login/setup, but GUI app installation is separate from headless agent execution. Use `/mock-cluster` to preview a simulated multi-device harness.
+The Chainlit sidebar includes a **Local Agent** selector so you can choose `codex`, `claude-code`, `openswarm`, or `simulated` without editing `.env`. The sidebar updates to show only the credential/profile fields for that selected agent. The selected backend is advertised to the cluster, and chat turns use that local profile when it is ready. Codex can use a working CLI command or a saved `OPENAI_API_KEY` / sidebar **OpenAI API Key** for Responses API fallback. Claude Code uses its local command/login profile. Credentials are saved locally in ignored `ui_state.json`, so each computer keeps its own agent harness profile without committing secrets. The app can also detect the Microsoft Store Codex desktop app and offer **Launch Codex App** for login/setup, but GUI app installation is separate from headless agent execution.
 
 Machine capability tags are computed, not hand-authored. The coordinator infers roles from the selected local agent, detected tool readiness, the default agent set, and the current chat goal. A prompt that asks for a backend here and frontend on another machine should advertise and route `backend`/`frontend` work differently from a prompt that only asks for review or documentation.
 
-On startup, the app opens a **Harness Dashboard** side panel with live machines, local execution policy, workspace details, and repo-consolidation flow. The chat bar remains the place to talk to the local/coordinating agent. Use `/dashboard` or the **Dashboard** action to reopen the panel after closing it.
+On startup, the app opens a **Harness Dashboard** side panel with live machines, local execution policy, workspace details, and repo-consolidation flow. The chat bar remains the place to talk to the local/coordinating agent. Use `/dashboard`, the **Dashboard** action, or the floating **Dashboard / Settings** switcher to reopen panels after closing them.
 
 Selecting an agent is separate from being ready to execute it. Codex and Claude Code should be signed in through their normal local CLI flows and launched from a terminal where `codex` or `claude` is on `PATH`, or configured with a full command path in the sidebar. A signed-in desktop app can be launched for setup, but the harness cannot reuse a GUI-only desktop session as a headless worker unless a callable CLI/API path is also available. If Codex CLI is unavailable, saving an OpenAI API key in the sidebar enables the Codex API fallback.
 
@@ -85,7 +85,6 @@ In chat, use commands like:
 /claim-orchestrator
 /tasks
 /backends
-/mock-cluster
 /connect
 /host-coordinator
 /connect-coordinator

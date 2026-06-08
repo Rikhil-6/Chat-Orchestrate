@@ -24,3 +24,4 @@ if (-not (Test-Path ".env") -and (Test-Path ".env.example")) {
 
 Write-Host "Setup complete."
 Write-Host "Run the UI with: .\scripts\run_local.ps1"
+Write-Host "Then open: http://localhost:7862"
