@@ -15,6 +15,7 @@ import chainlit as cl
 import httpx
 from chainlit.input_widget import Select, Switch, TextInput
 
+from chat_orchestrate.a2a import A2A_PROTOCOL_VERSION
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
@@ -78,6 +79,7 @@ def stop_hosted_coordinator() -> None:
     if coordinator_process and coordinator_process.poll() is None:
         coordinator_process.terminate()
     coordinator_process = None
+    clear_hosted_pid_files()
 
 
 def is_hosting_live() -> bool:
@@ -834,6 +836,8 @@ async def restart_app() -> None:
         )
     ).send()
     await asyncio.sleep(0.5)
+    stop_hosted_coordinator()
+    stop_ui_worker()
     os._exit(3)
 
 
@@ -1513,6 +1517,11 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     can_host = not connected_to_http or hosting_live
     host_port = hosted_connection.get("port") or str(settings.coordinator_port if hosting_live else "")
     coordinator_urls = local_coordinator_urls(int(host_port)) if hosting_live and host_port.isdigit() else []
+    a2a_base_url = ""
+    if hosting_live and coordinator_urls:
+        a2a_base_url = coordinator_urls[0]
+    elif connected_to_http:
+        a2a_base_url = coordination.http_url or settings.coordination_http_url
     return {
         "overview": {
             "cluster_id": settings.cluster_id,
@@ -1529,6 +1538,10 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "coordinator_url": coordination.http_url or settings.coordination_http_url,
             "host_urls": coordinator_urls,
             "token_set": bool(settings.coordination_token),
+            "a2a_enabled": hosting_live or connected_to_http,
+            "a2a_version": A2A_PROTOCOL_VERSION,
+            "a2a_agent_card_url": f"{a2a_base_url.rstrip('/')}/.well-known/agent-card.json" if a2a_base_url else "",
+            "a2a_rpc_url": f"{a2a_base_url.rstrip('/')}/a2a/rpc" if a2a_base_url else "",
         },
         "workspace": {
             "name": project.name if project else "default",
@@ -1898,6 +1911,18 @@ def hosted_state_path(cluster_id: str, port: int) -> Path:
     return Path(".tmp") / f"hosted-coordinator-{safe or 'cluster'}-{port}.json"
 
 
+def hosted_pid_path(cluster_id: str, port: int) -> Path:
+    return hosted_state_path(cluster_id, port).with_suffix(".pid")
+
+
+def clear_hosted_pid_files() -> None:
+    for path in Path(".tmp").glob("hosted-coordinator-*.pid"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def clear_hosted_state_files() -> None:
     safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in settings.cluster_id)
     patterns = [
@@ -2011,16 +2036,22 @@ async def start_hosted_coordinator(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    pid_path = hosted_pid_path(cluster_id, port)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(coordinator_process.pid), encoding="utf-8")
     if not await wait_for_coordinator(port, cluster_id):
         if coordinator_process.poll() is None:
             coordinator_process.terminate()
+        clear_hosted_pid_files()
         return False
     if coordinator_process.poll() is not None:
+        clear_hosted_pid_files()
         return False
     token_error = await validate_coordinator_token(f"http://127.0.0.1:{port}", cluster_id, token)
     if token_error:
         if coordinator_process.poll() is None:
             coordinator_process.terminate()
+        clear_hosted_pid_files()
         if status_message:
             status_message.content = (
                 "Coordinator answered locally, but it did not accept the new token. "

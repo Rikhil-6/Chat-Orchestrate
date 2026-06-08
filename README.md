@@ -11,6 +11,7 @@ The app is designed for multiple browser clients to connect to the same deployme
 - An OpenSwarm adapter that calls a `swarm-api` OpenAI-compatible endpoint.
 - A project-space registry backed by local JSON state.
 - A distributed machine registry with orchestrator election and task delegation.
+- A2A-compatible discovery/RPC endpoints on the hosted coordinator for mixed agent harnesses.
 - Mixed backend support for Codex, Claude Code, OpenSwarm, and simulated workers.
 - A compact cluster roster showing connected machines and their agent backends.
 - Local chat routing through installed Codex or Claude Code CLIs when available.
@@ -147,6 +148,26 @@ When auto-host fallback is enabled, a machine that cannot reach any saved coordi
 If `8765` is already busy, **Host Coordinator** picks the next available port and prints that port in the connection pack. If other machines still cannot open `/health`, allow inbound TCP for that port in the host OS firewall or use a VPN/tunnel URL.
 
 Use **End Session** or `/end-session` to stop any coordinator hosted by this UI and wipe saved coordinator URLs/tokens from `runtime_config.json`.
+
+## Agent2Agent Interop
+
+When a machine is hosting or connected to the HTTP coordinator, the coordinator also exposes a small A2A-compatible surface:
+
+```text
+GET  /.well-known/agent-card.json
+GET  /a2a/agent-card
+POST /a2a/rpc
+```
+
+The Agent Card advertises this cluster as a JSON-RPC A2A endpoint with project-orchestration and local-agent-handoff skills. The JSON-RPC endpoint currently supports `GetExtendedAgentCard`, `ListTasks`, `GetTask`, and `SendMessage`. `SendMessage` creates a delegated coordinator task in the same shared task state used by the Chainlit UI and workers.
+
+This is intentionally an interop lane, not a replacement for the app's own coordinator. The coordinator still owns machine membership, host election, shared tokens, and repo convergence. A2A lets external or future harnesses discover the cluster and submit/check task-shaped work without needing to know whether a machine is running Codex, Claude Code, Gemini CLI, OpenSwarm, or another local agent.
+
+Use the same bearer token shown in the host connection pack:
+
+```http
+Authorization: Bearer <coordination-token>
+```
 
 ## Worker Launch
 

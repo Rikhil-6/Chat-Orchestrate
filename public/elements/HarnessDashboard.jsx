@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Cpu,
   GitBranch,
+  Handshake,
   ListChecks,
   LogOut,
   Network,
@@ -250,6 +251,34 @@ export default function HarnessDashboard() {
           </div>
           <p className="mt-3 text-xs leading-5 text-muted-foreground">
             Roles are inferred from the latest chat task and available machines; defaults only describe what can run.
+          </p>
+        </div>
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <Handshake className="h-4 w-4" /> Agent2Agent
+        </h3>
+        <div className="rounded-md border bg-card p-3">
+          <div className="grid gap-2 text-xs">
+            <div className="flex justify-between gap-3">
+              <span className="text-muted-foreground">Status</span>
+              <strong>{overview.a2a_enabled ? `A2A ${overview.a2a_version || "1.0"}` : "available when hosted"}</strong>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-muted-foreground">Agent card</span>
+              <strong className="max-w-[65%] truncate text-right">
+                {overview.a2a_agent_card_url || "start or join host"}
+              </strong>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-muted-foreground">RPC</span>
+              <strong className="max-w-[65%] truncate text-right">{overview.a2a_rpc_url || "not bound"}</strong>
+            </div>
+          </div>
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">
+            A2A is an interoperability lane for external agent harnesses; cluster membership and tokens still come from
+            this coordinator session.
           </p>
         </div>
       </section>
