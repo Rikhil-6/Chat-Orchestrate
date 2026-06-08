@@ -27,7 +27,7 @@ from chat_orchestrate.backends import (
     launch_backend_app,
     run_task,
 )
-from chat_orchestrate.capabilities import capability_policy_summary, infer_machine_capabilities
+from chat_orchestrate.capabilities import capability_policy_summary, infer_goal_roles, infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import MachineNode, OrchestrationRun
@@ -158,22 +158,13 @@ async def on_chat_start() -> None:
     await restore_chat_history()
     await cl.Message(
         content=(
-            f"Ready. Active project space: {active}\n\n"
-            f"Machine: `{local_node.machine_id}` as `{local_node.role}`\n"
-            f"Orchestrator: `{orchestrator_node.machine_id}`\n\n"
-            f"Cluster: `{settings.cluster_id}`\n"
-            f"Coordination: `{settings.coordination_backend}`\n"
-            f"Backends: `{', '.join(agent_backends)}`\n\n"
-            "Commands: `/spaces`, `/use <name>`, `/create-space <name> <path>`, "
-            "`/worktree <name> <repo-path> <branch>`, `/clone <name> <git-url> [branch]`, "
-            "`/workspace-modes`, `/machines`, "
-            "`/claim-orchestrator`, `/release-orchestrator`, `/tasks`, `/backends`, "
-            "`/mock-cluster`, `/connect`, `/host-coordinator`, `/connect-coordinator`, `/connect-file`, "
-            "`/end-session`, `/clear-history`."
+            f"Ready in project space {active}. The harness dashboard is open in the side panel.\n\n"
+            f"Machine `{local_node.machine_id}` is `{local_node.role}`. "
+            f"Current orchestrator: `{orchestrator_node.machine_id}`. "
+            "Type a goal below, or use `/dashboard` and `/help`."
         )
     ).send()
     await update_cluster_roster()
-    await show_machines()
 
 
 @cl.on_message
@@ -188,6 +179,7 @@ async def on_message(message: cl.Message) -> None:
         await cl.Message(content="Pick a project space first with `/use <name>`.").send()
         return
     append_chat("user", "You", text)
+    cl.user_session.set("last_goal", text)
     selected_backend = cl.user_session.get("agent_backend") or "auto"
     refresh_advertised_backends(selected_backend, text)
 
@@ -197,7 +189,7 @@ async def on_message(message: cl.Message) -> None:
     except CoordinationError as exc:
         await cl.Message(content=f"Coordination error: {exc}").send()
         return
-    await update_cluster_roster()
+        await update_cluster_roster()
     status = cl.Message(
         content=(
             f"Starting orchestration for `{project.name}`...\n\n"
@@ -268,7 +260,11 @@ async def handle_command(text: str) -> None:
     command = parts[0].lower()
 
     try:
-        if command == "/spaces":
+        if command == "/dashboard":
+            await show_dashboard_sidebar()
+        elif command == "/help":
+            await cl.Message(content=command_help(), actions=machine_actions()).send()
+        elif command == "/spaces":
             await show_spaces()
         elif command == "/use" and len(parts) == 2:
             project = spaces.get(parts[1])
@@ -889,6 +885,11 @@ async def refresh_machines(_: cl.Action) -> None:
     await show_machines()
 
 
+@cl.action_callback("refresh_dashboard")
+async def refresh_dashboard(_: cl.Action) -> None:
+    await show_dashboard_sidebar()
+
+
 @cl.action_callback("claim_orchestrator")
 async def claim_orchestrator(_: cl.Action) -> None:
     node = coordination.claim_orchestrator()
@@ -965,6 +966,13 @@ async def clear_history_action(_: cl.Action) -> None:
 
 def machine_actions() -> list[cl.Action]:
     return [
+        cl.Action(
+            name="refresh_dashboard",
+            label="Dashboard",
+            tooltip="Open or refresh the harness dashboard sidebar.",
+            icon="layout-dashboard",
+            payload={},
+        ),
         cl.Action(
             name="refresh_machines",
             label="Refresh Machines",
@@ -1086,13 +1094,88 @@ async def update_cluster_roster() -> None:
         try:
             existing.content = content
             await existing.update()
-            return
         except Exception:
             pass
+    await show_dashboard_sidebar(machines, orchestrator_node.machine_id)
 
-    message = cl.Message(content=content, actions=cluster_roster_actions())
-    await message.send()
-    cl.user_session.set("cluster_roster_message", message)
+
+async def show_dashboard_sidebar(
+    machines: list[MachineNode] | None = None,
+    orchestrator_id: str | None = None,
+) -> None:
+    try:
+        coordination.heartbeat()
+        machines = machines or coordination.list_machines()
+        orchestrator_id = orchestrator_id or coordination.get_or_elect_orchestrator().machine_id
+    except CoordinationError:
+        return
+    await cl.ElementSidebar.set_title("Harness Dashboard")
+    await cl.ElementSidebar.set_elements(
+        [
+            cl.CustomElement(
+                name="HarnessDashboard",
+                display="side",
+                props=dashboard_props(machines, orchestrator_id),
+            )
+        ]
+    )
+
+
+def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
+    project = cl.user_session.get("project_space")
+    last_goal = str(cl.user_session.get("last_goal") or "")
+    selected_backend = selected_chat_backend()
+    local_capabilities = infer_machine_capabilities(
+        agent_backends,
+        selected_backend,
+        settings.default_agents,
+        last_goal,
+    )
+    online_count = sum(1 for machine in machines if _machine_status(machine) == "online")
+    return {
+        "overview": {
+            "cluster_id": settings.cluster_id,
+            "coordination_backend": settings.coordination_backend,
+            "orchestrator_id": orchestrator_id,
+            "machine_id": settings.machine_id or socket.gethostname().lower(),
+            "local_backend": local_chat_backend_label(),
+            "online_count": online_count,
+            "stale_count": len(machines) - online_count,
+        },
+        "workspace": {
+            "name": project.name if project else "default",
+            "path": str(project.path) if project else str(settings.workspaces_root / "default"),
+            "mode": project.mode if project else "local",
+            "branch": project.branch if project else "",
+            "remote": project.git_remote if project else "",
+        },
+        "policy": {
+            "selected_backend": selected_backend,
+            "capabilities": local_capabilities,
+            "goal_roles": infer_goal_roles(last_goal, settings.default_agents),
+            "last_goal": last_goal,
+        },
+        "repo": {
+            "worker_outputs": "branches, patches, preview URLs, screenshots",
+            "canonical": "origin/main in the selected project workspace",
+            "merge": "pull, test, resolve conflicts, merge, document",
+        },
+        "machines": [machine_dashboard_props(machine) for machine in machines],
+    }
+
+
+def machine_dashboard_props(machine: MachineNode) -> dict:
+    age = datetime.now(UTC) - machine.last_seen
+    return {
+        "machine_id": machine.machine_id,
+        "hostname": machine.hostname,
+        "role": machine.role,
+        "status": machine.status,
+        "status_label": _machine_status(machine),
+        "seen_seconds": max(0, int(age.total_seconds())),
+        "capabilities": machine.capabilities,
+        "agent_backends": machine.agent_backends,
+    }
 
 
 def cluster_roster_cards(machines, orchestrator_id: str) -> str:
@@ -1189,6 +1272,13 @@ def _format_roster_row(machine, orchestrator_id: str) -> str:
 def cluster_roster_actions() -> list[cl.Action]:
     return [
         cl.Action(
+            name="refresh_dashboard",
+            label="Dashboard",
+            tooltip="Open or refresh the harness dashboard sidebar.",
+            icon="layout-dashboard",
+            payload={},
+        ),
+        cl.Action(
             name="refresh_machines",
             label="Refresh",
             tooltip="Refresh connected machines.",
@@ -1278,6 +1368,8 @@ def _machine_status(machine) -> str:
 def command_help() -> str:
     return (
         "## Commands\n\n"
+        "- `/dashboard`\n"
+        "- `/help`\n"
         "- `/spaces`\n"
         "- `/use <name>`\n"
         "- `/create-space <name> <path>`\n"
