@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import httpx
 
-from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND
+from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, GEMINI_CLI_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND
 from .capabilities import infer_goal_roles
 from .models import DelegatedTask, MachineNode, ProjectSpace
 
@@ -221,6 +221,8 @@ class CoordinationManager:
             return CODEX_BACKEND
         if "claude" in lowered and CLAUDE_CODE_BACKEND in machine.agent_backends:
             return CLAUDE_CODE_BACKEND
+        if "gemini" in lowered and GEMINI_CLI_BACKEND in machine.agent_backends:
+            return GEMINI_CLI_BACKEND
         if OPEN_SWARM_BACKEND in machine.agent_backends:
             return OPEN_SWARM_BACKEND
         if machine.agent_backends:

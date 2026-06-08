@@ -6,6 +6,7 @@ import httpx
 from .backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
+    GEMINI_CLI_BACKEND,
     SIMULATED_BACKEND,
     backend_execution_hint,
     command_for_backend,
@@ -135,6 +136,8 @@ class LocalAgentCliClient(SwarmClient):
             args = [command, "exec", "--skip-git-repo-check", prompt]
         elif backend == CLAUDE_CODE_BACKEND:
             args = [command, "-p", prompt]
+        elif backend == GEMINI_CLI_BACKEND:
+            args = [command, "-p", prompt]
         else:
             return ""
 
@@ -183,7 +186,13 @@ class LocalAgentCliClient(SwarmClient):
         if configured:
             return configured
         return command_for_backend(backend) or (
-            "codex" if backend == CODEX_BACKEND else "claude" if backend == CLAUDE_CODE_BACKEND else backend
+            "codex"
+            if backend == CODEX_BACKEND
+            else "claude"
+            if backend == CLAUDE_CODE_BACKEND
+            else "gemini"
+            if backend == GEMINI_CLI_BACKEND
+            else backend
         )
 
 

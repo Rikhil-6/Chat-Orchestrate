@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     local_agent_timeout_seconds: int = 180
     codex_command: str = ""
     claude_command: str = ""
+    gemini_command: str = ""
     delegated_task_wait_seconds: float = 90.0
     default_agent_set: str = "coordinator,researcher,engineer,reviewer,documenter"
 
@@ -58,6 +59,7 @@ class Settings(BaseSettings):
         return {
             "codex": self.codex_command.strip(),
             "claude-code": self.claude_command.strip(),
+            "gemini-cli": self.gemini_command.strip(),
         }
 
 

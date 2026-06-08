@@ -18,6 +18,7 @@ from chainlit.input_widget import Select, Switch, TextInput
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
+    GEMINI_CLI_BACKEND,
     OPEN_SWARM_BACKEND,
     SIMULATED_BACKEND,
     backend_availability,
@@ -233,20 +234,37 @@ async def on_message(message: cl.Message) -> None:
 async def on_settings_update(updated_settings: dict) -> None:
     backend = normalize_selected_backend(str(updated_settings.get("agent_backend", "Select")))
     restore_history = bool(updated_settings.get("restore_history", True))
-    openai_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
+    visible_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
+    visible_command = clean_command_input(updated_settings.get("codex_command", ""))
+    openai_api_key = visible_api_key if backend == CODEX_BACKEND else clean_secret_input(updated_settings.get("openai_api_key", ""))
+    claude_api_key = (
+        clean_secret_input(updated_settings.get("claude_api_key", ""))
+        or (visible_api_key if backend == CLAUDE_CODE_BACKEND else "")
+    )
+    gemini_api_key = (
+        clean_secret_input(updated_settings.get("gemini_api_key", ""))
+        or (visible_api_key if backend == GEMINI_CLI_BACKEND else "")
+    )
     codex_command = validated_command_preference(
         CODEX_BACKEND,
         clean_command_input(updated_settings.get("codex_command", "")),
     )
     claude_command = validated_command_preference(
         CLAUDE_CODE_BACKEND,
-        clean_command_input(updated_settings.get("claude_command", "")),
+        clean_command_input(updated_settings.get("claude_command", "")) or (visible_command if backend == CLAUDE_CODE_BACKEND else ""),
+    )
+    gemini_command = validated_command_preference(
+        GEMINI_CLI_BACKEND,
+        clean_command_input(updated_settings.get("gemini_command", "")) or (visible_command if backend == GEMINI_CLI_BACKEND else ""),
     )
     cl.user_session.set("agent_backend", backend)
     cl.user_session.set("restore_history", restore_history)
     cl.user_session.set("openai_api_key", openai_api_key)
+    cl.user_session.set("claude_api_key", claude_api_key)
+    cl.user_session.set("gemini_api_key", gemini_api_key)
     cl.user_session.set("codex_command", codex_command)
     cl.user_session.set("claude_command", claude_command)
+    cl.user_session.set("gemini_command", gemini_command)
     refresh_advertised_backends(backend)
     save_agent_credentials(backend, updated_settings)
     save_preferences(
@@ -255,6 +273,7 @@ async def on_settings_update(updated_settings: dict) -> None:
             "restore_history": str(restore_history).lower(),
             "codex_command": codex_command,
             "claude_command": claude_command,
+            "gemini_command": gemini_command,
         }
     )
     await setup_chat_settings(backend)
@@ -418,8 +437,11 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
     restore_history = preferences.get("restore_history", "true").lower() != "false"
     codex_credentials = credentials.get(CODEX_BACKEND, {})
     claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
+    gemini_credentials = credentials.get(GEMINI_CLI_BACKEND, {})
     openswarm_credentials = credentials.get(OPEN_SWARM_BACKEND, {})
     openai_api_key = clean_secret_input(codex_credentials.get("openai_api_key", ""))
+    claude_api_key = clean_secret_input(claude_credentials.get("claude_api_key", ""))
+    gemini_api_key = clean_secret_input(gemini_credentials.get("gemini_api_key", ""))
     codex_command = validated_command_preference(
         CODEX_BACKEND,
         clean_command_input(codex_credentials.get("codex_command", preferences.get("codex_command", settings.codex_command))),
@@ -430,15 +452,23 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
             claude_credentials.get("claude_command", preferences.get("claude_command", settings.claude_command))
         ),
     )
+    gemini_command = validated_command_preference(
+        GEMINI_CLI_BACKEND,
+        clean_command_input(
+            gemini_credentials.get("gemini_command", preferences.get("gemini_command", settings.gemini_command))
+        ),
+    )
     command_overrides = {
         CODEX_BACKEND: codex_command,
         CLAUDE_CODE_BACKEND: claude_command,
+        GEMINI_CLI_BACKEND: gemini_command,
     }
     detected_backends = detect_agent_backends(settings.configured_backends, command_overrides)
     backend_values = [
         "auto",
         CODEX_BACKEND,
         CLAUDE_CODE_BACKEND,
+        GEMINI_CLI_BACKEND,
         OPEN_SWARM_BACKEND,
         SIMULATED_BACKEND,
         *detected_backends,
@@ -455,16 +485,21 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
     )
     codex_initial = codex_command or command_for_backend(CODEX_BACKEND, command_overrides) or ""
     claude_initial = claude_command or command_for_backend(CLAUDE_CODE_BACKEND, command_overrides) or ""
+    gemini_initial = gemini_command or command_for_backend(GEMINI_CLI_BACKEND, command_overrides) or ""
     cl.user_session.set("agent_backend", selected_backend)
     cl.user_session.set("restore_history", restore_history)
     cl.user_session.set("openai_api_key", openai_api_key)
+    cl.user_session.set("claude_api_key", claude_api_key)
+    cl.user_session.set("gemini_api_key", gemini_api_key)
     cl.user_session.set("codex_command", codex_initial)
     cl.user_session.set("claude_command", claude_initial)
+    cl.user_session.set("gemini_command", gemini_initial)
     refresh_advertised_backends(selected_backend)
     save_preferences(
         {
             "codex_command": codex_command,
             "claude_command": claude_command,
+            "gemini_command": gemini_command,
         }
     )
     widgets = [
@@ -502,14 +537,42 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
             ]
         )
     elif selected_backend == CLAUDE_CODE_BACKEND:
-        widgets.append(
-            TextInput(
-                id="claude_command",
-                label="Claude Command",
-                initial=claude_initial,
-                placeholder="claude, claude.cmd, or full path",
-                tooltip="Command used when Local Agent is claude-code.",
-            )
+        widgets.extend(
+            [
+                TextInput(
+                    id="claude_api_key",
+                    label="Claude API Key",
+                    initial=claude_api_key,
+                    placeholder="Saved locally; optional for Claude SDK/API flows",
+                    tooltip="Saved locally in ignored ui_state.json for this machine.",
+                ),
+                TextInput(
+                    id="claude_command",
+                    label="Claude Code Command",
+                    initial=claude_initial,
+                    placeholder="claude, claude.cmd, or full path",
+                    tooltip="Command used when Local Agent is claude-code.",
+                ),
+            ]
+        )
+    elif selected_backend == GEMINI_CLI_BACKEND:
+        widgets.extend(
+            [
+                TextInput(
+                    id="gemini_api_key",
+                    label="Gemini API Key",
+                    initial=gemini_api_key,
+                    placeholder="Saved locally; optional for Gemini API flows",
+                    tooltip="Saved locally in ignored ui_state.json for this machine.",
+                ),
+                TextInput(
+                    id="gemini_command",
+                    label="Gemini CLI Command",
+                    initial=gemini_initial,
+                    placeholder="gemini, gemini.cmd, or full path",
+                    tooltip="Command used when Local Agent is gemini-cli.",
+                ),
+            ]
         )
     elif selected_backend == OPEN_SWARM_BACKEND:
         widgets.extend(
@@ -588,7 +651,7 @@ def resolve_settings_backend(
     if requested != "auto" and requested in available_values:
         return requested
 
-    for backend in [CODEX_BACKEND, CLAUDE_CODE_BACKEND, OPEN_SWARM_BACKEND]:
+    for backend in [CODEX_BACKEND, CLAUDE_CODE_BACKEND, GEMINI_CLI_BACKEND, OPEN_SWARM_BACKEND]:
         if backend in available_values and backend_is_callable_with_overrides(backend, command_overrides):
             return backend
     if SIMULATED_BACKEND in available_values:
@@ -642,6 +705,13 @@ def backend_setup_needed_cards(backend: str) -> str:
             "Code's normal terminal flow, make sure `claude` is on `PATH`, or set the full command path in "
             "the sidebar. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
         )
+    if backend == GEMINI_CLI_BACKEND:
+        return (
+            "## Gemini CLI Is Selected, But Not Connected For Headless Runs\n\n"
+            "This harness talks to Gemini through the local `gemini` command. Sign in through Gemini CLI's "
+            "normal terminal flow, make sure `gemini` is on `PATH`, or set the full command path in the "
+            "sidebar. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
+        )
     return f"## `{backend}` Is Not Ready\n\n{backend_execution_hint(backend)}"
 
 
@@ -650,7 +720,7 @@ def backend_setup_actions(backend: str) -> list[cl.Action]:
         cl.Action(
             name="auto_detect_agents",
             label="Auto-detect Agents",
-            tooltip="Search common local install paths for Codex and Claude commands.",
+            tooltip="Search common local install paths for Codex, Claude, and Gemini commands.",
             icon="search",
             payload={},
         ),
@@ -694,6 +764,7 @@ async def auto_detect_agents() -> None:
     detected_commands = {
         CODEX_BACKEND: discover_backend_commands(CODEX_BACKEND),
         CLAUDE_CODE_BACKEND: discover_backend_commands(CLAUDE_CODE_BACKEND),
+        GEMINI_CLI_BACKEND: discover_backend_commands(GEMINI_CLI_BACKEND),
     }
     preferences = {}
     credential_updates = []
@@ -709,14 +780,21 @@ async def auto_detect_agents() -> None:
         preferences["claude_command"] = command
         save_credentials(CLAUDE_CODE_BACKEND, {"claude_command": command})
         credential_updates.append(f"- Claude Code CLI: `{command}`")
+    if detected_commands[GEMINI_CLI_BACKEND]:
+        command = detected_commands[GEMINI_CLI_BACKEND][0]
+        cl.user_session.set("gemini_command", command)
+        preferences["gemini_command"] = command
+        save_credentials(GEMINI_CLI_BACKEND, {"gemini_command": command})
+        credential_updates.append(f"- Gemini CLI: `{command}`")
     if preferences:
         save_preferences(preferences)
     selected_backend = resolve_settings_backend(
         str(cl.user_session.get("agent_backend") or "auto"),
-        ["auto", CODEX_BACKEND, CLAUDE_CODE_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND],
+        ["auto", CODEX_BACKEND, CLAUDE_CODE_BACKEND, GEMINI_CLI_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND],
         {
             CODEX_BACKEND: str(cl.user_session.get("codex_command") or preferences.get("codex_command", "")),
             CLAUDE_CODE_BACKEND: str(cl.user_session.get("claude_command") or preferences.get("claude_command", "")),
+            GEMINI_CLI_BACKEND: str(cl.user_session.get("gemini_command") or preferences.get("gemini_command", "")),
         },
     )
     if selected_backend != "auto":
@@ -734,7 +812,7 @@ async def auto_detect_agents() -> None:
             content=(
                 "## No Callable Agent Commands Found\n\n"
                 "I checked PATH plus common npm, user-local, WindowsApps, Homebrew, and local bin locations. "
-                "If Codex or Claude Code is installed elsewhere, paste the full command path in the sidebar "
+                "If Codex, Claude Code, or Gemini CLI is installed elsewhere, paste the full command path in the sidebar "
                 "or restart the app from a terminal where the command works."
             ),
             actions=backend_setup_actions(selected_backend),
@@ -767,12 +845,22 @@ def save_agent_credentials(backend: str, values: dict) -> None:
         save_credentials(CODEX_BACKEND, payload)
     elif backend == CLAUDE_CODE_BACKEND:
         payload = {
+            "claude_api_key": clean_secret_input(values.get("claude_api_key", "")),
             "claude_command": validated_command_preference(
                 CLAUDE_CODE_BACKEND,
                 clean_command_input(values.get("claude_command", "")),
             ),
         }
         save_credentials(CLAUDE_CODE_BACKEND, payload)
+    elif backend == GEMINI_CLI_BACKEND:
+        payload = {
+            "gemini_api_key": clean_secret_input(values.get("gemini_api_key", "")),
+            "gemini_command": validated_command_preference(
+                GEMINI_CLI_BACKEND,
+                clean_command_input(values.get("gemini_command", "")),
+            ),
+        }
+        save_credentials(GEMINI_CLI_BACKEND, payload)
     elif backend == OPEN_SWARM_BACKEND:
         save_credentials(
             OPEN_SWARM_BACKEND,
@@ -788,13 +876,16 @@ def load_command_overrides() -> dict[str, str]:
     try:
         codex_command = cl.user_session.get("codex_command")
         claude_command = cl.user_session.get("claude_command")
+        gemini_command = cl.user_session.get("gemini_command")
     except Exception:
         codex_command = None
         claude_command = None
+        gemini_command = None
     preferences = load_preferences()
     credentials = load_credentials()
     codex_credentials = credentials.get(CODEX_BACKEND, {})
     claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
+    gemini_credentials = credentials.get(GEMINI_CLI_BACKEND, {})
     return {
         CODEX_BACKEND: clean_command_input(
             codex_command
@@ -805,6 +896,11 @@ def load_command_overrides() -> dict[str, str]:
             claude_command
             or claude_credentials.get("claude_command")
             or preferences.get("claude_command", settings.claude_command)
+        ),
+        GEMINI_CLI_BACKEND: clean_command_input(
+            gemini_command
+            or gemini_credentials.get("gemini_command")
+            or preferences.get("gemini_command", settings.gemini_command)
         ),
     }
 
@@ -1236,7 +1332,7 @@ def machine_actions() -> list[cl.Action]:
         cl.Action(
             name="auto_detect_agents",
             label="Auto-detect Agents",
-            tooltip="Search common local install paths for Codex and Claude commands.",
+            tooltip="Search common local install paths for Codex, Claude, and Gemini commands.",
             icon="search",
             payload={},
         ),
@@ -1533,7 +1629,7 @@ def cluster_roster_actions() -> list[cl.Action]:
         cl.Action(
             name="auto_detect_agents",
             label="Detect",
-            tooltip="Search common local install paths for Codex and Claude commands.",
+            tooltip="Search common local install paths for Codex, Claude, and Gemini commands.",
             icon="search",
             payload={},
         ),
@@ -1633,7 +1729,7 @@ def command_help() -> str:
 
 def backend_status_cards() -> str:
     visible_backends = []
-    for backend in [CODEX_BACKEND, CLAUDE_CODE_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND, *agent_backends]:
+    for backend in [CODEX_BACKEND, CLAUDE_CODE_BACKEND, GEMINI_CLI_BACKEND, OPEN_SWARM_BACKEND, SIMULATED_BACKEND, *agent_backends]:
         if backend not in visible_backends:
             visible_backends.append(backend)
     items = backend_availability(visible_backends, load_command_overrides())

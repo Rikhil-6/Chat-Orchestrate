@@ -131,7 +131,7 @@ custom_css = "/public/chat-orchestrate.css?v=dashboard-left"
 
 # Specify a JavaScript file that can be used to customize the user interface.
 # The JavaScript file can be served from the public directory.
-custom_js = "/public/harness-panels.js?v=panel-rail-10"
+custom_js = "/public/harness-panels.js?v=sidebar-polish-17"
 
 # The style of alert boxes. Can be "classic" or "modern".
 alert_style = "classic"

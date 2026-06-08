@@ -15,6 +15,7 @@ from .models import DelegatedTask
 SIMULATED_BACKEND = "simulated"
 CODEX_BACKEND = "codex"
 CLAUDE_CODE_BACKEND = "claude-code"
+GEMINI_CLI_BACKEND = "gemini-cli"
 OPEN_SWARM_BACKEND = "openswarm"
 
 
@@ -35,6 +36,8 @@ def detect_agent_backends(configured: list[str], command_overrides: dict[str, st
             detected.append(CODEX_BACKEND)
         if command_for_backend(CLAUDE_CODE_BACKEND, command_overrides):
             detected.append(CLAUDE_CODE_BACKEND)
+        if command_for_backend(GEMINI_CLI_BACKEND, command_overrides):
+            detected.append(GEMINI_CLI_BACKEND)
         return detected
 
     backends = []
@@ -99,6 +102,8 @@ def run_task(
     if task.preferred_backend == CODEX_BACKEND:
         args = [command, "exec", "--skip-git-repo-check", prompt]
     elif task.preferred_backend == CLAUDE_CODE_BACKEND:
+        args = [command, "-p", prompt]
+    elif task.preferred_backend == GEMINI_CLI_BACKEND:
         args = [command, "-p", prompt]
     else:
         return f"Backend `{task.preferred_backend}` has no command runner yet."
@@ -253,6 +258,8 @@ def _default_command_names(backend: str) -> list[str]:
         return ["codex", "codex.exe", "codex.cmd"]
     if backend == CLAUDE_CODE_BACKEND:
         return ["claude", "claude.exe", "claude.cmd"]
+    if backend == GEMINI_CLI_BACKEND:
+        return ["gemini", "gemini.exe", "gemini.cmd"]
     return []
 
 
@@ -289,6 +296,8 @@ def _smoke_test_command(command: str, backend: str) -> bool:
         return "codex" in output and "access is denied" not in output
     if backend == CLAUDE_CODE_BACKEND:
         return "claude" in output
+    if backend == GEMINI_CLI_BACKEND:
+        return "gemini" in output
     return False
 
 
