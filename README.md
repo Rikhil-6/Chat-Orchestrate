@@ -60,6 +60,8 @@ On startup, the app opens a **Harness Dashboard** side panel with live machines,
 
 Selecting an agent is separate from being ready to execute it. Codex and Claude Code should be signed in through their normal local CLI flows and launched from a terminal where `codex` or `claude` is on `PATH`, or configured with a full command path in the sidebar. A signed-in desktop app can be launched for setup, but the harness cannot reuse a GUI-only desktop session as a headless worker unless a callable CLI/API path is also available. If Codex CLI is unavailable, saving an OpenAI API key in the sidebar enables the Codex API fallback.
 
+Use **Auto-detect Agents** or `/detect-agents` to scan PATH plus common npm, user-local, WindowsApps, Homebrew, and local bin install locations for `codex` and `claude`. If you installed a command after the app started or changed terminal PATH, use **Restart App** or `/restart-app`; when launched through `scripts/run_local.py`, the supervisor relaunches the UI and worker automatically.
+
 ## Project Spaces
 
 Project spaces are kept under `WORKSPACES_ROOT` unless an absolute path is supplied. The default is:
@@ -77,6 +79,8 @@ In chat, use commands like:
 /worktree my-app C:\code\my-app feature/agent-pass
 /clone my-app https://github.com/org/repo.git feature/experiment
 /workspace-modes
+/detect-agents
+/restart-app
 /machines
 /claim-orchestrator
 /tasks

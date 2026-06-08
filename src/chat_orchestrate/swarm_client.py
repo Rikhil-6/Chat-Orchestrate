@@ -83,7 +83,7 @@ class LocalAgentCliClient(SwarmClient):
         openai_api_key: str = "",
     ) -> None:
         self.settings = settings
-        self.preferred_backend = preferred_backend
+        self.preferred_backend = "auto" if preferred_backend in {"Select", ""} else preferred_backend
         self.command_overrides = command_overrides or settings.command_overrides
         self.openai_api_key = openai_api_key.strip() or settings.openai_api_key.strip()
         self.backends = [
@@ -198,4 +198,3 @@ def build_swarm_client(
     if settings.use_local_agent_chat:
         return LocalAgentCliClient(settings, preferred_backend, command_overrides, openai_api_key)
     return LocalPreviewSwarmClient()
-

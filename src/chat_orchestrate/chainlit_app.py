@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import os
 import re
 import secrets
 import socket
@@ -24,6 +25,7 @@ from chat_orchestrate.backends import (
     command_for_backend,
     command_is_runnable,
     detect_agent_backends,
+    discover_backend_commands,
     launch_backend_app,
     run_task,
 )
@@ -180,7 +182,7 @@ async def on_message(message: cl.Message) -> None:
         return
     append_chat("user", "You", text)
     cl.user_session.set("last_goal", text)
-    selected_backend = cl.user_session.get("agent_backend") or "auto"
+    selected_backend = normalize_selected_backend(str(cl.user_session.get("agent_backend") or "auto"))
     refresh_advertised_backends(selected_backend, text)
     if not await ensure_selected_backend_ready(selected_backend):
         return
@@ -191,7 +193,7 @@ async def on_message(message: cl.Message) -> None:
     except CoordinationError as exc:
         await cl.Message(content=f"Coordination error: {exc}").send()
         return
-        await update_cluster_roster()
+    await update_cluster_roster()
     status = cl.Message(
         content=(
             f"Starting orchestration for `{project.name}`...\n\n"
@@ -266,6 +268,10 @@ async def handle_command(text: str) -> None:
             await show_dashboard_sidebar()
         elif command == "/help":
             await cl.Message(content=command_help(), actions=machine_actions()).send()
+        elif command == "/detect-agents":
+            await auto_detect_agents()
+        elif command == "/restart-app":
+            await restart_app()
         elif command == "/spaces":
             await show_spaces()
         elif command == "/use" and len(parts) == 2:
@@ -532,20 +538,35 @@ def backend_setup_needed_cards(backend: str) -> str:
             "1. A reachable Codex CLI command on `PATH`, signed in through its normal terminal flow.\n"
             "2. A full path to the Codex CLI command in the sidebar.\n"
             "3. An OpenAI API key saved in the sidebar for the Codex API fallback.\n\n"
-            "After setup, restart this Chainlit app from the same terminal/session that can run the command."
+            "Use **Auto-detect Agents** after installing/signing in. Use **Restart App** only if you changed "
+            "your terminal PATH or installed a command while this app was already running."
         )
     if backend == CLAUDE_CODE_BACKEND:
         return (
             "## Claude Code Is Selected, But Not Connected For Headless Runs\n\n"
             "This harness talks to Claude Code through the local `claude` command. Sign in through Claude "
             "Code's normal terminal flow, make sure `claude` is on `PATH`, or set the full command path in "
-            "the sidebar. Then restart this Chainlit app from that same terminal/session."
+            "the sidebar. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
         )
     return f"## `{backend}` Is Not Ready\n\n{backend_execution_hint(backend)}"
 
 
 def backend_setup_actions(backend: str) -> list[cl.Action]:
     actions = [
+        cl.Action(
+            name="auto_detect_agents",
+            label="Auto-detect Agents",
+            tooltip="Search common local install paths for Codex and Claude commands.",
+            icon="search",
+            payload={},
+        ),
+        cl.Action(
+            name="restart_app",
+            label="Restart App",
+            tooltip="Restart the local app when it is running under scripts/run_local.py.",
+            icon="rotate-cw",
+            payload={},
+        ),
         cl.Action(
             name="show_backends",
             label="Agent Status",
@@ -573,6 +594,61 @@ def backend_setup_actions(backend: str) -> list[cl.Action]:
             ),
         )
     return actions
+
+
+async def auto_detect_agents() -> None:
+    detected_commands = {
+        CODEX_BACKEND: discover_backend_commands(CODEX_BACKEND),
+        CLAUDE_CODE_BACKEND: discover_backend_commands(CLAUDE_CODE_BACKEND),
+    }
+    preferences = {}
+    credential_updates = []
+    if detected_commands[CODEX_BACKEND]:
+        command = detected_commands[CODEX_BACKEND][0]
+        cl.user_session.set("codex_command", command)
+        preferences["codex_command"] = command
+        save_credentials(CODEX_BACKEND, {"codex_command": command})
+        credential_updates.append(f"- Codex CLI: `{command}`")
+    if detected_commands[CLAUDE_CODE_BACKEND]:
+        command = detected_commands[CLAUDE_CODE_BACKEND][0]
+        cl.user_session.set("claude_command", command)
+        preferences["claude_command"] = command
+        save_credentials(CLAUDE_CODE_BACKEND, {"claude_command": command})
+        credential_updates.append(f"- Claude Code CLI: `{command}`")
+    if preferences:
+        save_preferences(preferences)
+    selected_backend = normalize_selected_backend(str(cl.user_session.get("agent_backend") or "auto"))
+    refresh_advertised_backends(selected_backend, str(cl.user_session.get("last_goal") or ""))
+    await setup_chat_settings(selected_backend if selected_backend != "auto" else "Select")
+    await show_dashboard_sidebar()
+    if credential_updates:
+        await cl.Message(
+            content="## Agent Commands Detected\n\n" + "\n".join(credential_updates) + "\n\nYou can retry your message now."
+        ).send()
+    else:
+        await cl.Message(
+            content=(
+                "## No Callable Agent Commands Found\n\n"
+                "I checked PATH plus common npm, user-local, WindowsApps, Homebrew, and local bin locations. "
+                "If Codex or Claude Code is installed elsewhere, paste the full command path in the sidebar "
+                "or restart the app from a terminal where the command works."
+            ),
+            actions=backend_setup_actions(selected_backend),
+        ).send()
+
+
+async def restart_app() -> None:
+    marker = Path(".tmp") / "restart-local"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
+    await cl.Message(
+        content=(
+            "Restart requested. If this app was launched with `scripts/run_local.py`, it will come back "
+            "automatically. Otherwise, start it again with `./scripts/run_local.sh` or `.\\scripts\\run_local.ps1`."
+        )
+    ).send()
+    await asyncio.sleep(0.5)
+    os._exit(3)
 
 
 def save_agent_credentials(backend: str, values: dict) -> None:
@@ -999,6 +1075,16 @@ async def show_backends_action(_: cl.Action) -> None:
     await show_backends()
 
 
+@cl.action_callback("auto_detect_agents")
+async def auto_detect_agents_action(_: cl.Action) -> None:
+    await auto_detect_agents()
+
+
+@cl.action_callback("restart_app")
+async def restart_app_action(_: cl.Action) -> None:
+    await restart_app()
+
+
 @cl.action_callback("show_mock_cluster")
 async def show_mock_cluster_action(_: cl.Action) -> None:
     await show_mock_cluster()
@@ -1090,6 +1176,20 @@ def machine_actions() -> list[cl.Action]:
             label="Backends",
             tooltip="Show local agent backend availability.",
             icon="cpu",
+            payload={},
+        ),
+        cl.Action(
+            name="auto_detect_agents",
+            label="Auto-detect Agents",
+            tooltip="Search common local install paths for Codex and Claude commands.",
+            icon="search",
+            payload={},
+        ),
+        cl.Action(
+            name="restart_app",
+            label="Restart App",
+            tooltip="Restart the local app when launched through scripts/run_local.py.",
+            icon="rotate-cw",
             payload={},
         ),
         cl.Action(
@@ -1393,6 +1493,20 @@ def cluster_roster_actions() -> list[cl.Action]:
             payload={},
         ),
         cl.Action(
+            name="auto_detect_agents",
+            label="Detect",
+            tooltip="Search common local install paths for Codex and Claude commands.",
+            icon="search",
+            payload={},
+        ),
+        cl.Action(
+            name="restart_app",
+            label="Restart",
+            tooltip="Restart the local app when launched through scripts/run_local.py.",
+            icon="rotate-cw",
+            payload={},
+        ),
+        cl.Action(
             name="launch_codex_app",
             label="Launch Codex",
             tooltip="Open the installed Codex desktop app for login/setup.",
@@ -1426,8 +1540,8 @@ def selected_chat_backend() -> str:
     except Exception:
         selected = None
     if selected:
-        return str(selected)
-    return load_preferences().get("agent_backend", "auto")
+        return normalize_selected_backend(str(selected))
+    return normalize_selected_backend(load_preferences().get("agent_backend", "auto"))
 
 
 def _format_machine_card(machine, orchestrator_id: str) -> str:
@@ -1456,6 +1570,8 @@ def command_help() -> str:
         "## Commands\n\n"
         "- `/dashboard`\n"
         "- `/help`\n"
+        "- `/detect-agents`\n"
+        "- `/restart-app`\n"
         "- `/spaces`\n"
         "- `/use <name>`\n"
         "- `/create-space <name> <path>`\n"

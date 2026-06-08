@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from terminal_control import shutdown_message
 
+RESTART_MARKER = Path(".tmp") / "restart-local"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Chainlit UI and local worker together.")
@@ -39,35 +41,43 @@ def main() -> None:
     if args.backends:
         env_args.extend(["--backends", args.backends])
 
-    worker = subprocess.Popen(
-        [sys.executable, "scripts/run_worker.py", *env_args],
-        stdin=subprocess.DEVNULL,
-    )
-    try:
-        chainlit = subprocess.Popen(
-            [
-                sys.executable,
-                "scripts/run_chainlit.py",
-                "src/chat_orchestrate/chainlit_app.py",
-                "--host",
-                args.host,
-                "--port",
-                args.port,
-            ]
+    while True:
+        if RESTART_MARKER.exists():
+            RESTART_MARKER.unlink()
+        worker = subprocess.Popen(
+            [sys.executable, "scripts/run_worker.py", *env_args],
+            stdin=subprocess.DEVNULL,
         )
-        chainlit.wait()
-    except KeyboardInterrupt:
-        shutdown_message()
-    finally:
-        for process in [locals().get("chainlit"), worker]:
-            if process and process.poll() is None:
-                process.terminate()
-        for process in [locals().get("chainlit"), worker]:
-            if process:
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+        try:
+            chainlit = subprocess.Popen(
+                [
+                    sys.executable,
+                    "scripts/run_chainlit.py",
+                    "src/chat_orchestrate/chainlit_app.py",
+                    "--host",
+                    args.host,
+                    "--port",
+                    args.port,
+                ]
+            )
+            chainlit.wait()
+        except KeyboardInterrupt:
+            shutdown_message()
+            return
+        finally:
+            for process in [locals().get("chainlit"), worker]:
+                if process and process.poll() is None:
+                    process.terminate()
+            for process in [locals().get("chainlit"), worker]:
+                if process:
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+        if RESTART_MARKER.exists():
+            print("Restart marker detected. Relaunching local UI and worker...")
+            continue
+        return
 
 
 if __name__ == "__main__":

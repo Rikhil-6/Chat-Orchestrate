@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from chat_orchestrate.backends import CODEX_BACKEND, command_for_backend, extract_response_text, run_task
+from chat_orchestrate.backends import CODEX_BACKEND, command_for_backend, discover_backend_commands, extract_response_text, run_task
 from chat_orchestrate.coordination import CoordinationManager
 from chat_orchestrate.models import ProjectSpace
 
@@ -125,6 +125,20 @@ def test_none_command_override_falls_back_to_auto_lookup(tmp_path: Path, monkeyp
     monkeypatch.setenv("PATH", str(tmp_path))
 
     assert command_for_backend(CODEX_BACKEND, {CODEX_BACKEND: "None"}).lower() == str(executable).lower()
+
+
+def test_discover_backend_commands_finds_nested_candidate(tmp_path: Path, monkeypatch) -> None:
+    executable = tmp_path / "Programs" / "Codex" / "bin" / "codex.cmd"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("@echo off\r\necho codex help\r\nexit /B 0\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "user"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "pf86"))
+
+    assert str(executable) in discover_backend_commands(CODEX_BACKEND)
 
 
 def test_windows_store_codex_resource_is_not_treated_as_cli(tmp_path: Path, monkeypatch) -> None:

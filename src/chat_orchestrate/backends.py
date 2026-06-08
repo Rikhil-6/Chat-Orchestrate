@@ -159,13 +159,42 @@ def command_for_backend(backend: str, command_overrides: dict[str, str] | None =
             candidate = _valid_path_command(Path(override), backend)
             return str(candidate) if candidate else None
         return _valid_command(shutil.which(override), backend)
-    discovered = _discover_command(_default_command_names(backend))
+    discovered = discover_backend_commands(backend)
     if discovered:
-        return discovered
-    if backend == CODEX_BACKEND:
-        return _safe_which("codex", backend)
-    if backend == CLAUDE_CODE_BACKEND:
-        return _safe_which("claude", backend)
+        return discovered[0]
+    return None
+
+
+def discover_backend_commands(backend: str, limit: int = 8) -> list[str]:
+    discovered = []
+    for command in _discover_commands(_default_command_names(backend), backend):
+        if command not in discovered:
+            discovered.append(command)
+        if len(discovered) >= limit:
+            break
+    return discovered
+
+
+def _discover_commands(names: list[str], backend: str) -> list[str]:
+    commands = []
+    for name in names:
+        found = _safe_which(name, backend)
+        if found:
+            commands.append(found)
+
+    for directory in _candidate_command_dirs():
+        for candidate in _candidate_files(directory, names):
+            found = _valid_path_command(candidate, backend)
+            if found:
+                commands.append(str(found))
+
+    return commands
+
+
+def _discover_command(names: list[str]) -> str | None:
+    discovered = _discover_commands(names, "")
+    if discovered:
+        return discovered[0]
     return None
 
 
@@ -227,21 +256,6 @@ def _default_command_names(backend: str) -> list[str]:
     return []
 
 
-def _discover_command(names: list[str]) -> str | None:
-    for name in names:
-        found = _safe_which(name, "")
-        if found:
-            return found
-
-    for directory in _candidate_command_dirs():
-        for name in names:
-            candidate = _valid_path_command(directory / name, "")
-            if candidate:
-                return str(candidate)
-
-    return None
-
-
 def _safe_which(name: str, backend: str) -> str | None:
     found = shutil.which(name)
     return _valid_command(found, backend) if found else None
@@ -280,6 +294,8 @@ def _smoke_test_command(command: str, backend: str) -> bool:
 
 def _candidate_command_dirs() -> list[Path]:
     candidates = []
+    path_value = os.environ.get("PATH", "")
+    candidates.extend(Path(item) for item in path_value.split(os.pathsep) if item)
     for key in ["APPDATA", "LOCALAPPDATA", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)"]:
         value = os.environ.get(key)
         if not value:
@@ -290,11 +306,47 @@ def _candidate_command_dirs() -> list[Path]:
                 base / "npm",
                 base / ".npm-global" / "bin",
                 base / ".local" / "bin",
+                base / ".bun" / "bin",
+                base / ".cargo" / "bin",
                 base / "Programs",
+                base / "Programs" / "nodejs",
+                base / "Microsoft" / "WindowsApps",
+                base / "pnpm",
+                base / "Yarn" / "bin",
             ]
         )
+    if platform.system().lower() == "darwin":
+        candidates.extend(
+            [
+                Path("/opt/homebrew/bin"),
+                Path("/usr/local/bin"),
+                Path("/Applications"),
+            ]
+        )
+    else:
+        candidates.extend([Path("/usr/local/bin"), Path("/usr/bin"), Path("/snap/bin")])
 
-    return candidates
+    unique = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def _candidate_files(directory: Path, names: list[str]) -> list[Path]:
+    files = [directory / name for name in names]
+    if not directory.exists() or not directory.is_dir():
+        return files
+    try:
+        for child in directory.iterdir():
+            if not child.is_dir():
+                continue
+            for name in names:
+                files.append(child / name)
+                files.append(child / "bin" / name)
+    except OSError:
+        pass
+    return files
 
 
 def _windows_codex_install() -> Path | None:
