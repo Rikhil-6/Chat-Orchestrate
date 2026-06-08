@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,7 +16,7 @@ import {
 } from "lucide-react";
 
 function action(name) {
-  callAction({ name, payload: {} });
+  return callAction({ name, payload: {} });
 }
 
 function MachineCard({ machine, orchestratorId }) {
@@ -115,6 +116,7 @@ function EmptyPlan({ repo }) {
 }
 
 export default function HarnessDashboard() {
+  const refreshing = useRef(false);
   const machines = props.machines || [];
   const overview = props.overview || {};
   const workspace = props.workspace || {};
@@ -124,6 +126,20 @@ export default function HarnessDashboard() {
   const goalRoles = policy.goal_roles || [];
   const tasks = run.tasks || [];
   const turns = run.turns || [];
+
+  useEffect(() => {
+    const refresh = async () => {
+      if (refreshing.current) return;
+      refreshing.current = true;
+      try {
+        await action("refresh_dashboard");
+      } finally {
+        refreshing.current = false;
+      }
+    };
+    const interval = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   return (
     <div data-harness-dashboard="true" className="space-y-4 p-1">
