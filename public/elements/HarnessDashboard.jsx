@@ -1,7 +1,18 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Cpu, GitBranch, Network, RadioTower, RefreshCw, RotateCw, Search, Settings, Users } from "lucide-react";
+import {
+  Cpu,
+  GitBranch,
+  ListChecks,
+  Network,
+  RadioTower,
+  RefreshCw,
+  RotateCw,
+  Search,
+  Settings,
+  Users,
+} from "lucide-react";
 
 function action(name) {
   callAction({ name, payload: {} });
@@ -101,7 +112,10 @@ export default function HarnessDashboard() {
   const workspace = props.workspace || {};
   const policy = props.policy || {};
   const repo = props.repo || {};
+  const run = props.run || {};
   const goalRoles = policy.goal_roles || [];
+  const tasks = run.tasks || [];
+  const turns = run.turns || [];
 
   return (
     <div data-harness-dashboard="true" className="space-y-4 p-1">
@@ -167,6 +181,58 @@ export default function HarnessDashboard() {
           </p>
         </div>
       </section>
+
+      {(run.goal || tasks.length > 0 || turns.length > 0) && (
+        <section className="space-y-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <ListChecks className="h-4 w-4" /> Run Activity
+          </h3>
+          <div className="rounded-md border bg-card p-3">
+            <div className="grid gap-2 text-xs">
+              {run.goal && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">Goal</span>
+                  <strong className="max-w-[65%] truncate text-right">{run.goal}</strong>
+                </div>
+              )}
+              {run.orchestrator_machine && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">Orchestrator</span>
+                  <strong className="text-right">{run.orchestrator_machine}</strong>
+                </div>
+              )}
+            </div>
+            {tasks.length > 0 && (
+              <div className="mt-3 grid gap-1.5">
+                {tasks.slice(-5).map((task, index) => (
+                  <div key={`${task.role}-${task.machine}-${index}`} className="rounded-md bg-muted/60 px-2 py-1.5">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <strong>{task.role}</strong>
+                      <span className="text-muted-foreground">{task.status}</span>
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground">
+                      {task.machine} / {task.backend}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {tasks.length === 0 && turns.length > 0 && (
+              <div className="mt-3 grid gap-1.5">
+                {turns.slice(-4).map((turn, index) => (
+                  <div key={`${turn.agent}-${index}`} className="rounded-md bg-muted/60 px-2 py-1.5">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <strong>{turn.agent}</strong>
+                      <span className="text-muted-foreground">{turn.backend || "local"}</span>
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-muted-foreground">{turn.summary}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="space-y-2">
         <h3 className="flex items-center gap-2 text-sm font-semibold">

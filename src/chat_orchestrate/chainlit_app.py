@@ -160,10 +160,8 @@ async def on_chat_start() -> None:
     await restore_chat_history()
     await cl.Message(
         content=(
-            f"Ready in project space {active}. The harness dashboard is open in the side panel.\n\n"
-            f"Machine `{local_node.machine_id}` is `{local_node.role}`. "
-            f"Current orchestrator: `{orchestrator_node.machine_id}`. "
-            "Type a goal below, or use `/dashboard` and `/help`."
+            f"I'm ready in project space {active}. The dashboard has the machine and connection details "
+            "whenever you need them."
         )
     ).send()
     await update_cluster_roster()
@@ -188,20 +186,12 @@ async def on_message(message: cl.Message) -> None:
         return
 
     try:
-        local_node = coordination.heartbeat()
-        orchestrator_node = coordination.get_or_elect_orchestrator()
+        coordination.heartbeat()
+        coordination.get_or_elect_orchestrator()
     except CoordinationError as exc:
         await cl.Message(content=f"Coordination error: {exc}").send()
         return
     await update_cluster_roster()
-    status = cl.Message(
-        content=(
-            f"Starting orchestration for `{project.name}`...\n\n"
-            f"Local machine: `{local_node.machine_id}`\n"
-            f"Orchestrator machine: `{orchestrator_node.machine_id}`"
-        )
-    )
-    await status.send()
 
     turn_agent_names = infer_goal_roles(text)
     turn_orchestrator = Orchestrator(
@@ -215,17 +205,21 @@ async def on_message(message: cl.Message) -> None:
         coordination,
         settings.delegated_task_wait_seconds,
     )
+    turns = []
+    final_run = None
     async for event in turn_orchestrator.run(text, project):
         if isinstance(event, OrchestrationRun):
-            append_chat("assistant", "Run Summary", event.final)
-            await cl.Message(content=event.final).send()
+            final_run = event
             continue
 
-        append_chat("assistant", event.agent, event.content)
-        await cl.Message(
-            author=event.agent,
-            content=f"**{event.role}**\n\n{event.content}",
-        ).send()
+        turns.append(event)
+
+    if final_run:
+        cl.user_session.set("last_run", final_run)
+    response = conversational_response(final_run, turns)
+    append_chat("assistant", "Assistant", response)
+    await cl.Message(content=response).send()
+    await update_cluster_roster()
 
 
 @cl.on_settings_update
@@ -258,6 +252,65 @@ async def on_settings_update(updated_settings: dict) -> None:
     )
     await setup_chat_settings(backend)
     await update_cluster_roster()
+
+
+def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
+    goal = run.goal if run else str(cl.user_session.get("last_goal") or "")
+    if is_lightweight_chat(goal):
+        return "Hey, I’m here. Send me what you want the agents to work on, and I’ll keep the coordination details in the dashboard."
+
+    if not turns:
+        return "I’m on it. I’ve updated the dashboard with the current coordination state."
+
+    preferred_roles = ["engineer", "backend", "frontend", "coordinator", "researcher", "reviewer", "documenter"]
+    chosen = turns[-1]
+    for role in preferred_roles:
+        match = next((turn for turn in turns if role in turn.role.lower() or role == turn.agent.lower()), None)
+        if match:
+            chosen = match
+            break
+
+    content = brief_agent_chat_content(chosen.content)
+    if not content:
+        content = "Done. I’ve updated the dashboard with the current coordination state."
+
+    if run and run.delegated_tasks:
+        return f"{content}\n\nI’ve tucked the machine routing and task details into the dashboard."
+    return content
+
+
+def is_lightweight_chat(goal: str) -> bool:
+    clean = goal.strip().lower()
+    return bool(re.fullmatch(r"(hi|hello|hey|yo|sup|test|smoke|hello there|hello .{1,40})", clean))
+
+
+def brief_agent_chat_content(content: str) -> str:
+    clean_content = clean_agent_chat_content(content)
+    skipped = {"workstreams", "dependencies", "success", "validation", "routing"}
+    for line in clean_content.splitlines():
+        clean = line.strip(" -")
+        if clean and clean.lower().rstrip(":") not in skipped:
+            return clean
+    return ""
+
+
+def clean_agent_chat_content(content: str) -> str:
+    lines = []
+    skip_next_blank = False
+    for line in content.splitlines():
+        clean = line.strip()
+        if re.fullmatch(r"`[^`]+`\s+local response", clean):
+            skip_next_blank = True
+            continue
+        if re.fullmatch(r"`[^`]+`\s+result from\s+`[^`]+`", clean):
+            skip_next_blank = True
+            continue
+        if skip_next_blank and not clean:
+            skip_next_blank = False
+            continue
+        skip_next_blank = False
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 async def handle_command(text: str) -> None:
@@ -772,10 +825,13 @@ def clean_secret_input(value: object) -> str:
 async def restore_chat_history() -> None:
     if not cl.user_session.get("restore_history", True):
         return
-    history = load_chat_history()
+    history = [
+        record
+        for record in load_chat_history()
+        if record.role == "user" or record.author.lower() == "assistant"
+    ]
     if not history:
         return
-    await cl.Message(content="## Restored Local Chat\n\nRecent local messages from this machine:").send()
     for record in history:
         if record.role == "user":
             await cl.Message(author=record.author, content=record.content).send()
@@ -1326,6 +1382,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "canonical": "Selected after workspace mode and task scope are known",
             "merge": "Coordinator proposes the merge path after workers return outputs",
         },
+        "run": dashboard_run_props(),
         "machines": [machine_dashboard_props(machine) for machine in machines],
     }
 
@@ -1342,6 +1399,55 @@ def machine_dashboard_props(machine: MachineNode) -> dict:
         "capabilities": machine.capabilities,
         "agent_backends": machine.agent_backends,
     }
+
+
+def dashboard_run_props() -> dict:
+    run = cl.user_session.get("last_run")
+    tasks = recent_dashboard_tasks(getattr(run, "run_id", ""))
+    return {
+        "run_id": getattr(run, "run_id", ""),
+        "goal": getattr(run, "goal", str(cl.user_session.get("last_goal") or "")),
+        "orchestrator_machine": getattr(run, "orchestrator_machine", ""),
+        "turns": [
+            {
+                "agent": turn.agent,
+                "role": turn.role,
+                "machine": turn.assigned_machine or "",
+                "backend": turn.preferred_backend or "",
+                "summary": first_content_line(turn.content),
+            }
+            for turn in getattr(run, "turns", [])[-6:]
+        ],
+        "tasks": tasks,
+    }
+
+
+def recent_dashboard_tasks(run_id: str) -> list[dict]:
+    try:
+        tasks = coordination.list_tasks()
+    except CoordinationError:
+        return []
+    if run_id:
+        tasks = [task for task in tasks if task.run_id == run_id]
+    return [
+        {
+            "role": task.role,
+            "machine": task.assigned_machine,
+            "backend": task.preferred_backend,
+            "status": task.status,
+            "title": task.title,
+        }
+        for task in tasks[-8:]
+    ]
+
+
+def first_content_line(content: str) -> str:
+    clean_content = clean_agent_chat_content(content)
+    for line in clean_content.splitlines():
+        clean = line.strip(" -")
+        if clean:
+            return clean[:140]
+    return "No output captured."
 
 
 def cluster_roster_cards(machines, orchestrator_id: str) -> str:
