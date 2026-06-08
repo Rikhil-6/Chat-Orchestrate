@@ -111,7 +111,14 @@ class CoordinationManager:
         self.heartbeat()
         return self._machine_from_json(self._load()["machines"][orchestrator_id])
 
-    def plan_delegation(self, run_id: str, project: ProjectSpace, goal: str) -> list[DelegatedTask]:
+    def plan_delegation(
+        self,
+        run_id: str,
+        project: ProjectSpace,
+        goal: str,
+        machine_preferences: dict[str, str] | None = None,
+        roles: list[str] | None = None,
+    ) -> list[DelegatedTask]:
         state = self._load()
         now = datetime.now(UTC)
         machines = self._online_machines(state, now)
@@ -119,8 +126,8 @@ class CoordinationManager:
             machines = [self.heartbeat()]
 
         tasks = []
-        for role in self._roles_for_goal(goal):
-            machine = self._best_machine_for_role(machines, role, goal)
+        for role in roles or self._roles_for_goal(goal):
+            machine = self._best_machine_for_role(machines, role, goal, (machine_preferences or {}).get(role, ""))
             preferred_backend = self._preferred_backend_for_role(machine, role, goal)
             tasks.append(
                 DelegatedTask(
@@ -185,7 +192,16 @@ class CoordinationManager:
     def _roles_for_goal(self, goal: str) -> list[str]:
         return infer_goal_roles(goal)
 
-    def _best_machine_for_role(self, machines: list[MachineNode], role: str, goal: str = "") -> MachineNode:
+    def _best_machine_for_role(
+        self,
+        machines: list[MachineNode],
+        role: str,
+        goal: str = "",
+        preferred_machine_id: str = "",
+    ) -> MachineNode:
+        preferred = self._machine_by_id(machines, preferred_machine_id)
+        if preferred is not None:
+            return preferred
         hinted = self._hinted_machine_for_role(machines, role, goal)
         if hinted is not None:
             return hinted
@@ -197,6 +213,18 @@ class CoordinationManager:
         pool = workers or pool
         index = sum(ord(char) for char in role) % len(pool)
         return pool[index]
+
+    def _machine_by_id(self, machines: list[MachineNode], machine_id: str) -> MachineNode | None:
+        clean = self._normalize_machine_id(machine_id)
+        if not clean:
+            return None
+        for machine in machines:
+            if clean == self._normalize_machine_id(machine.machine_id):
+                return machine
+        for machine in machines:
+            if clean == self._normalize_machine_id(machine.hostname):
+                return machine
+        return None
 
     def _hinted_machine_for_role(self, machines: list[MachineNode], role: str, goal: str) -> MachineNode | None:
         lowered = goal.lower()
@@ -393,6 +421,9 @@ class CoordinationManager:
             if url and url not in urls:
                 urls.append(url)
         return urls
+
+    def _normalize_machine_id(self, value: str) -> str:
+        return "".join(char for char in value.lower().strip() if char.isalnum())
 
     def _machine_from_json(self, item: dict) -> MachineNode:
         return MachineNode(
