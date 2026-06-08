@@ -6,6 +6,7 @@ import socket
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from json import JSONDecodeError
 from uuid import uuid4
 
 import httpx
@@ -260,15 +261,8 @@ class CoordinationManager:
             return state
 
         if not self.state_path.exists():
-            return {
-                "cluster_id": self.cluster_id,
-                "token_hash": self.token_hash,
-                "orchestrator_machine": None,
-                "orchestrator_claimed_at": None,
-                "machines": {},
-                "tasks": [],
-            }
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return self._initial_state()
+        state = self._load_file_state()
         self._assert_cluster_access(state)
         state.setdefault("cluster_id", self.cluster_id)
         state.setdefault("token_hash", self.token_hash)
@@ -281,7 +275,49 @@ class CoordinationManager:
         if self.backend == "http":
             self._http_save(state)
             return
-        self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        self._atomic_write_state(state)
+
+    def _initial_state(self) -> dict:
+        return {
+            "cluster_id": self.cluster_id,
+            "token_hash": self.token_hash,
+            "orchestrator_machine": None,
+            "orchestrator_claimed_at": None,
+            "machines": {},
+            "tasks": [],
+        }
+
+    def _load_file_state(self) -> dict:
+        raw = self.state_path.read_text(encoding="utf-8")
+        try:
+            return json.loads(raw)
+        except JSONDecodeError as exc:
+            decoder = json.JSONDecoder()
+            try:
+                state, end = decoder.raw_decode(raw)
+            except JSONDecodeError:
+                self._quarantine_corrupt_state(raw)
+                return self._initial_state()
+            if not isinstance(state, dict):
+                self._quarantine_corrupt_state(raw)
+                return self._initial_state()
+            if raw[end:].strip():
+                self._quarantine_corrupt_state(raw)
+                self._atomic_write_state(state)
+                return state
+            raise exc
+
+    def _quarantine_corrupt_state(self, raw: str) -> None:
+        stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+        backup = self.state_path.with_name(f"{self.state_path.stem}.corrupt-{stamp}{self.state_path.suffix}")
+        backup.write_text(raw, encoding="utf-8")
+
+    def _atomic_write_state(self, state: dict) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(state, indent=2)
+        temp_path = self.state_path.with_name(f"{self.state_path.name}.{uuid4().hex}.tmp")
+        temp_path.write_text(payload, encoding="utf-8")
+        temp_path.replace(self.state_path)
 
     def _http_load(self) -> dict:
         return self._http_request("GET").json()

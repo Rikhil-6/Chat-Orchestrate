@@ -11,6 +11,7 @@ pytest-cache-files-*/
 workspaces/
 workspace_state.json
 coordination_state.json
+coordination_state.corrupt-*.json
 runtime_config.json
 ui_state.json
 *.egg-info/

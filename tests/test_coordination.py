@@ -177,3 +177,20 @@ def test_coordination_token_mismatch_is_rejected(tmp_path: Path) -> None:
         assert "token" in str(exc).lower()
     else:
         raise AssertionError("Expected token mismatch to be rejected.")
+
+
+def test_corrupt_state_with_extra_json_is_salvaged(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    state.write_text(
+        '{"cluster_id":"local","token_hash":"","machines":{},"tasks":[]}'
+        '  }\n],"cluster_id":"local"}',
+        encoding="utf-8",
+    )
+    manager = CoordinationManager(state, "machine-a", ["coordinator"], ["simulated"])
+
+    node = manager.heartbeat()
+
+    assert node.machine_id == "machine-a"
+    assert manager.list_machines()[0].machine_id == "machine-a"
+    assert not state.read_text(encoding="utf-8").strip().endswith('],"cluster_id":"local"}')
+    assert list(tmp_path.glob("coordination.corrupt-*.json"))
