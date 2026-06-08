@@ -894,13 +894,14 @@ async def configure_http_connection() -> None:
 async def host_coordinator() -> None:
     global coordinator_process, hosted_connection
     if coordinator_process and coordinator_process.poll() is None:
-        cluster_id = hosted_connection.get("cluster_id", settings.cluster_id)
-        token = hosted_connection.get("token", settings.coordination_token)
-        port = int(hosted_connection.get("port", str(settings.coordinator_port)))
         await cl.Message(
-            content=hosted_coordinator_message(cluster_id, token, port)
+            content=(
+                "Existing hosted coordinator found. Rotating the connection token and restarting the "
+                "coordinator so the new token replaces the old session."
+            )
         ).send()
-        return
+        stop_hosted_coordinator()
+        hosted_connection = {}
 
     await cl.Message(content="Starting a coordinator on this machine...").send()
     default_cluster = settings.cluster_id if settings.cluster_id != "local" else "friends-project"
@@ -1681,10 +1682,15 @@ async def start_hosted_coordinator(
     token: str,
     port: int,
     status_message: cl.Message | None = None,
+    *,
+    force_restart: bool = False,
 ) -> bool:
     global coordinator_process
     if coordinator_process and coordinator_process.poll() is None:
-        return True
+        if force_restart:
+            stop_hosted_coordinator()
+        else:
+            return True
     state_path = hosted_state_path(cluster_id)
     if state_path.exists():
         state_path.unlink()
