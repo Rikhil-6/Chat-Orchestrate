@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from .coordination import CoordinationManager
-from .models import AgentSpec, AgentTurn, DelegatedTask, OrchestrationRun, ProjectSpace
+from .models import AgentSpec, AgentTurn, DelegatedTask, OrchestrationRun, ProgressUpdate, ProjectSpace
 from .swarm_client import SwarmClient
 
 
@@ -54,17 +54,23 @@ class Orchestrator:
         agent_names: list[str],
         coordination: CoordinationManager | None = None,
         delegated_task_wait_seconds: float = 30.0,
+        progress_interval_seconds: float = 5.0,
     ) -> None:
         self.client = client
         self.agents = [AGENT_LIBRARY[name] for name in agent_names if name in AGENT_LIBRARY]
         self.coordination = coordination
         self.delegated_task_wait_seconds = delegated_task_wait_seconds
+        self.progress_interval_seconds = progress_interval_seconds
         if not self.agents:
             self.agents = list(AGENT_LIBRARY.values())
 
-    async def run(self, goal: str, project: ProjectSpace) -> AsyncIterator[AgentTurn | OrchestrationRun]:
+    async def run(self, goal: str, project: ProjectSpace) -> AsyncIterator[ProgressUpdate | AgentTurn | OrchestrationRun]:
         run = OrchestrationRun(goal=goal, project=project)
         delegation_context = ""
+        yield ProgressUpdate(
+            message=f"Reading the goal and preparing `{project.name}` coordination.",
+            role="coordinator",
+        )
 
         if self.coordination is not None:
             orchestrator_node = self.coordination.get_or_elect_orchestrator()
@@ -72,13 +78,24 @@ class Orchestrator:
             run.delegated_tasks = self.coordination.plan_delegation(run.run_id, project, goal)
             self._add_delegated_agents(run)
             delegation_context = self._delegation_context(run)
+            yield ProgressUpdate(
+                message=self._planning_progress(run),
+                role="coordinator",
+                assigned_machine=orchestrator_node.machine_id,
+            )
 
         context = ""
 
         for agent in self.agents:
             agent_context = f"{delegation_context}\n\n{context}".strip()
             task = self._task_for_role(run, self._agent_key(agent))
-            output = await self._run_or_wait_for_agent(agent, project, goal, agent_context, task)
+            yield self._agent_start_progress(agent, task, run)
+            output = ""
+            async for update in self.run_agent_with_progress(agent, project, goal, agent_context, task):
+                if isinstance(update, ProgressUpdate):
+                    yield update
+                else:
+                    output = update
             turn = AgentTurn(
                 agent=agent.name,
                 role=agent.role,
@@ -91,11 +108,91 @@ class Orchestrator:
             yield turn
 
         run.final = self._summarize(run)
+        yield ProgressUpdate(
+            message="The run has enough agent output to answer; preparing the conversational summary.",
+            role="coordinator",
+            assigned_machine=run.orchestrator_machine,
+        )
         yield run
 
     def _append_context(self, context: str, turn: AgentTurn) -> str:
         block = f"## {turn.agent} ({turn.role})\n{turn.content}"
         return f"{context}\n\n{block}".strip()
+
+    def _planning_progress(self, run: OrchestrationRun) -> str:
+        if not run.delegated_tasks:
+            return f"`{run.orchestrator_machine}` is coordinating this run locally."
+        assignments = []
+        for task in run.delegated_tasks:
+            assignments.append(
+                f"{task.role} -> `{task.assigned_machine}` via `{task.preferred_backend}`"
+            )
+        return "Delegation is set: " + "; ".join(assignments[:6])
+
+    def _agent_start_progress(
+        self,
+        agent: AgentSpec,
+        task: DelegatedTask | None,
+        run: OrchestrationRun,
+    ) -> ProgressUpdate:
+        if task is None:
+            return ProgressUpdate(
+                message=f"{agent.name} is starting as {agent.role} on the local agent brain.",
+                agent=agent.name,
+                role=agent.role,
+                assigned_machine=run.orchestrator_machine,
+            )
+        if self.coordination is not None and task.assigned_machine != self.coordination.machine_id:
+            message = (
+                f"{agent.name} is assigned to `{task.assigned_machine}` as `{task.role}` "
+                f"using `{task.preferred_backend}`. Waiting for that machine to report back."
+            )
+        else:
+            message = (
+                f"{agent.name} is running here as `{task.role}` using `{task.preferred_backend}`. "
+                "It knows this is its slice of the orchestrated project run."
+            )
+        return ProgressUpdate(
+            message=message,
+            agent=agent.name,
+            role=task.role,
+            assigned_machine=task.assigned_machine,
+            preferred_backend=task.preferred_backend,
+            task_id=task.task_id,
+        )
+
+    def _agent_wait_progress(
+        self,
+        agent: AgentSpec,
+        task: DelegatedTask | None,
+        elapsed: int,
+    ) -> ProgressUpdate:
+        if task is None:
+            return ProgressUpdate(
+                message=f"{agent.name} is still working locally. Elapsed: {elapsed}s.",
+                agent=agent.name,
+                role=agent.role,
+                elapsed_seconds=elapsed,
+            )
+        if self.coordination is not None and task.assigned_machine != self.coordination.machine_id:
+            message = (
+                f"Still waiting on `{task.assigned_machine}` for `{task.role}` "
+                f"via `{task.preferred_backend}`. Elapsed: {elapsed}s."
+            )
+        else:
+            message = (
+                f"{agent.name} is still working as `{task.role}` via `{task.preferred_backend}`. "
+                f"Elapsed: {elapsed}s."
+            )
+        return ProgressUpdate(
+            message=message,
+            agent=agent.name,
+            role=task.role,
+            assigned_machine=task.assigned_machine,
+            preferred_backend=task.preferred_backend,
+            task_id=task.task_id,
+            elapsed_seconds=elapsed,
+        )
 
     async def _run_or_wait_for_agent(
         self,
@@ -118,6 +215,24 @@ class Orchestrator:
             "but no completed result came back before the local wait window ended. Make sure that "
             "machine is connected and has its UI or worker running with real local-agent execution enabled."
         )
+
+    async def run_agent_with_progress(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+        task: DelegatedTask | None,
+    ) -> AsyncIterator[ProgressUpdate | str]:
+        work = asyncio.create_task(self._run_or_wait_for_agent(agent, project, goal, context, task))
+        started = asyncio.get_running_loop().time()
+        while not work.done():
+            await asyncio.sleep(self.progress_interval_seconds)
+            if work.done():
+                break
+            elapsed = int(asyncio.get_running_loop().time() - started)
+            yield self._agent_wait_progress(agent, task, elapsed)
+        yield await work
 
     async def _wait_for_delegated_task(self, task: DelegatedTask) -> DelegatedTask | None:
         if self.coordination is None or self.delegated_task_wait_seconds <= 0:

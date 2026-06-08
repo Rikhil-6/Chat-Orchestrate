@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from chat_orchestrate.models import AgentSpec, ProjectSpace
+from chat_orchestrate.models import AgentSpec, AgentTurn, OrchestrationRun, ProgressUpdate, ProjectSpace
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.swarm_client import SwarmClient
 
@@ -18,8 +18,11 @@ async def test_orchestrator_emits_turns_and_final() -> None:
     orchestrator = Orchestrator(FakeClient(), ["coordinator", "reviewer"])
 
     events = [event async for event in orchestrator.run("ship it", project)]
+    turns = [event for event in events if isinstance(event, AgentTurn)]
+    progress = [event for event in events if isinstance(event, ProgressUpdate)]
+    final = next(event for event in events if isinstance(event, OrchestrationRun))
 
-    assert len(events) == 3
-    assert events[0].agent == "Coordinator"
-    assert events[1].agent == "Reviewer"
-    assert events[2].final.startswith("## Run")
+    assert progress
+    assert turns[0].agent == "Coordinator"
+    assert turns[1].agent == "Reviewer"
+    assert final.final.startswith("## Run")

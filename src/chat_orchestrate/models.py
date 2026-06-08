@@ -31,6 +31,17 @@ class AgentTurn:
 
 
 @dataclass(frozen=True)
+class ProgressUpdate:
+    message: str
+    agent: str | None = None
+    role: str | None = None
+    assigned_machine: str | None = None
+    preferred_backend: str | None = None
+    task_id: str | None = None
+    elapsed_seconds: int = 0
+
+
+@dataclass(frozen=True)
 class MachineNode:
     machine_id: str
     hostname: str

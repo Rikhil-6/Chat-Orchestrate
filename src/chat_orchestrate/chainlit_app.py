@@ -34,7 +34,7 @@ from chat_orchestrate.backends import (
 from chat_orchestrate.capabilities import infer_goal_roles, infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
-from chat_orchestrate.models import MachineNode, OrchestrationRun
+from chat_orchestrate.models import MachineNode, OrchestrationRun, ProgressUpdate
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
@@ -221,15 +221,28 @@ async def on_message(message: cl.Message) -> None:
     )
     turns = []
     final_run = None
+    progress_lines: list[str] = []
+    progress_message = cl.Message(content="Starting coordination...")
+    await progress_message.send()
     async for event in turn_orchestrator.run(text, project):
+        if isinstance(event, ProgressUpdate):
+            progress_lines.append(progress_line(event))
+            progress_message.content = "## Coordination Status\n\n" + "\n".join(progress_lines[-6:])
+            await progress_message.update()
+            continue
         if isinstance(event, OrchestrationRun):
             final_run = event
             continue
 
         turns.append(event)
+        progress_lines.append(f"- {event.agent} finished its `{event.role}` pass.")
+        progress_message.content = "## Coordination Status\n\n" + "\n".join(progress_lines[-6:])
+        await progress_message.update()
 
     if final_run:
         cl.user_session.set("last_run", final_run)
+    progress_message.content = "## Coordination Status\n\nReady with the response. Details are tucked into the dashboard."
+    await progress_message.update()
     response = conversational_response(final_run, turns)
     append_chat("assistant", "Assistant", response)
     await cl.Message(content=response).send()
@@ -309,6 +322,18 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
     if run and run.delegated_tasks:
         return f"{content}\n\nI’ve tucked the machine routing and task details into the dashboard."
     return content
+
+
+def progress_line(update: ProgressUpdate) -> str:
+    tags = []
+    if update.assigned_machine:
+        tags.append(f"`{update.assigned_machine}`")
+    if update.preferred_backend:
+        tags.append(f"`{update.preferred_backend}`")
+    if update.role:
+        tags.append(f"`{update.role}`")
+    prefix = f"- {' '.join(tags)} " if tags else "- "
+    return prefix + update.message
 
 
 def is_lightweight_chat(goal: str) -> bool:
