@@ -203,6 +203,7 @@ async def on_message(message: cl.Message) -> None:
     )
     await status.send()
 
+    turn_agent_names = infer_goal_roles(text)
     turn_orchestrator = Orchestrator(
         build_swarm_client(
             settings,
@@ -210,7 +211,7 @@ async def on_message(message: cl.Message) -> None:
             load_command_overrides(),
             load_openai_api_key(),
         ),
-        settings.default_agents,
+        turn_agent_names,
         coordination,
         settings.delegated_task_wait_seconds,
     )
@@ -1338,13 +1339,14 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "selected_backend": selected_backend,
             "selected_ready": selected_ready,
             "capabilities": local_capabilities,
-            "goal_roles": infer_goal_roles(last_goal, settings.default_agents),
+            "goal_roles": infer_goal_roles(last_goal) if last_goal else [],
             "last_goal": last_goal,
         },
         "repo": {
-            "worker_outputs": "branches, patches, preview URLs, screenshots",
-            "canonical": "origin/main in the selected project workspace",
-            "merge": "pull, test, resolve conflicts, merge, document",
+            "has_goal": bool(last_goal),
+            "worker_outputs": "Generated after the next task: branches, patches, preview URLs, screenshots",
+            "canonical": "Selected after workspace mode and task scope are known",
+            "merge": "Coordinator proposes the merge path after workers return outputs",
         },
         "machines": [machine_dashboard_props(machine) for machine in machines],
     }

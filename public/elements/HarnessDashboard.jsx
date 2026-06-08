@@ -73,15 +73,38 @@ function FlowCard({ title, body, accent }) {
   );
 }
 
+function EmptyPlan({ repo }) {
+  return (
+    <div className="rounded-md border border-dashed bg-card p-3">
+      <div className="text-sm font-semibold">No delegation plan yet</div>
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">
+        Connect machines, pick the local agent backend, and choose the project workspace. The next chat task will
+        decide which roles are needed, where they should run, and how repo outputs should converge.
+      </p>
+      <div className="mt-3 grid gap-2 text-xs">
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Worker outputs</span>
+          <strong className="text-right">{repo.worker_outputs}</strong>
+        </div>
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Canonical repo</span>
+          <strong className="text-right">{repo.canonical}</strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function HarnessDashboard() {
   const machines = props.machines || [];
   const overview = props.overview || {};
   const workspace = props.workspace || {};
   const policy = props.policy || {};
   const repo = props.repo || {};
+  const goalRoles = policy.goal_roles || [];
 
   return (
-    <div className="space-y-4 p-1">
+    <div data-harness-dashboard="true" className="space-y-4 p-1">
       <section className="space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -134,11 +157,13 @@ export default function HarnessDashboard() {
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-muted-foreground">Goal roles</span>
-              <strong className="text-right">{(policy.goal_roles || []).slice(0, 5).join(", ")}</strong>
+              <strong className="text-right">
+                {goalRoles.length ? goalRoles.slice(0, 5).join(", ") : "waiting for task"}
+              </strong>
             </div>
           </div>
           <p className="mt-3 text-xs leading-5 text-muted-foreground">
-            Tags are recomputed from local agent selection, detected tooling, and the latest chat goal.
+            Roles are inferred from the latest chat task and available machines; defaults only describe what can run.
           </p>
         </div>
       </section>
@@ -147,23 +172,27 @@ export default function HarnessDashboard() {
         <h3 className="flex items-center gap-2 text-sm font-semibold">
           <GitBranch className="h-4 w-4" /> Repo Consolidation
         </h3>
-        <div className="grid gap-2">
-          <FlowCard
-            title="Worker outputs"
-            body={repo.worker_outputs || "branches, patches, preview URLs, screenshots"}
-            accent="bg-sky-400"
-          />
-          <FlowCard
-            title="Canonical repo"
-            body={repo.canonical || "origin/main in the selected project workspace"}
-            accent="bg-emerald-400"
-          />
-          <FlowCard
-            title="Coordinator merge"
-            body={repo.merge || "pull, test, resolve conflicts, merge, document"}
-            accent="bg-amber-400"
-          />
-        </div>
+        {repo.has_goal ? (
+          <div className="grid gap-2">
+            <FlowCard
+              title="Worker outputs"
+              body={repo.worker_outputs || "branches, patches, preview URLs, screenshots"}
+              accent="bg-sky-400"
+            />
+            <FlowCard
+              title="Canonical repo"
+              body={repo.canonical || "origin/main in the selected project workspace"}
+              accent="bg-emerald-400"
+            />
+            <FlowCard
+              title="Coordinator merge"
+              body={repo.merge || "pull, test, resolve conflicts, merge, document"}
+              accent="bg-amber-400"
+            />
+          </div>
+        ) : (
+          <EmptyPlan repo={repo} />
+        )}
       </section>
 
       <section className="grid grid-cols-2 gap-2">

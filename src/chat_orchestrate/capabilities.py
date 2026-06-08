@@ -23,17 +23,20 @@ ROLE_KEYWORDS = {
 
 
 def infer_goal_roles(goal: str, defaults: list[str] | None = None) -> list[str]:
-    """Infer the run roles from the user's prompt."""
-    lowered = goal.lower()
+    """Infer the run roles from the user's prompt.
+
+    Defaults describe the local agent library, not a mandatory run plan. Keep
+    the run plan narrow until the user's task asks for more workstreams.
+    """
+    del defaults
+    lowered = goal.lower().strip()
     roles = ["coordinator"]
     for role, keywords in ROLE_KEYWORDS.items():
         if any(keyword in lowered for keyword in keywords):
             roles.append(role)
 
-    fallback_roles = defaults or BASE_CAPABILITIES
-    for role in fallback_roles:
-        if role not in roles:
-            roles.append(role)
+    if any(role in roles for role in {"backend", "frontend"}) and _looks_like_work_request(lowered):
+        roles.append("engineer")
     return unique(roles)
 
 
@@ -51,7 +54,7 @@ def infer_machine_capabilities(
     capabilities = ["coordinator"]
     for backend in normalized:
         capabilities.extend(BACKEND_CAPABILITIES.get(backend, []))
-    capabilities.extend(role for role in infer_goal_roles(goal, defaults) if role in {"backend", "frontend"})
+    capabilities.extend(role for role in infer_goal_roles(goal) if role in {"backend", "frontend"})
     if defaults:
         capabilities.extend(defaults)
     return unique(capabilities)
@@ -78,3 +81,22 @@ def unique(items: list[str]) -> list[str]:
 
 def _usable_backend(backend: str) -> bool:
     return backend not in {"", "auto", "Select"}
+
+
+def _looks_like_work_request(goal: str) -> bool:
+    if not goal:
+        return False
+    work_terms = {
+        "add",
+        "build",
+        "code",
+        "create",
+        "delegate",
+        "develop",
+        "fix",
+        "implement",
+        "make",
+        "setup",
+        "work",
+    }
+    return any(term in goal for term in work_terms)

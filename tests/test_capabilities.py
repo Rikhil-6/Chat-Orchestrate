@@ -11,6 +11,10 @@ def test_goal_roles_are_inferred_from_prompt() -> None:
     assert "engineer" in roles
 
 
+def test_simple_chat_does_not_expand_to_default_agent_lineup() -> None:
+    assert infer_goal_roles("hello") == ["coordinator"]
+
+
 def test_codex_machine_gets_goal_specific_capabilities() -> None:
     capabilities = infer_machine_capabilities(
         [CODEX_BACKEND],
