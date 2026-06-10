@@ -163,25 +163,25 @@ function ProjectSpaceCard({ workspace }) {
           Set Project
         </Button>
       </div>
-      <div className="mt-3 grid gap-2 text-xs">
-        <div className="flex justify-between gap-3">
+      <div className="mt-3 grid min-w-0 gap-2 text-xs">
+        <div className="flex min-w-0 justify-between gap-3">
           <span className="text-muted-foreground">Name</span>
-          <strong className="max-w-[62%] truncate text-right">{workspace.name || "default"}</strong>
+          <strong className="min-w-0 max-w-[62%] truncate text-right">{workspace.name || "default"}</strong>
         </div>
-        <div className="flex justify-between gap-3">
-          <span className="text-muted-foreground">Folder</span>
-          <strong className="max-w-[62%] truncate text-right" title={workspace.path || ""}>
+        <div className="flex min-w-0 justify-between gap-3">
+          <span className="shrink-0 text-muted-foreground">Folder</span>
+          <strong className="min-w-0 max-w-[62%] truncate text-right" title={workspace.path || ""}>
             {workspace.path || "workspaces/default"}
           </strong>
         </div>
-        <div className="flex justify-between gap-3">
+        <div className="flex min-w-0 justify-between gap-3">
           <span className="text-muted-foreground">Mode</span>
-          <strong className="text-right">{workspace.mode || "local"}</strong>
+          <strong className="min-w-0 truncate text-right">{workspace.mode || "local"}</strong>
         </div>
         {workspace.branch && (
-          <div className="flex justify-between gap-3">
+          <div className="flex min-w-0 justify-between gap-3">
             <span className="text-muted-foreground">Branch</span>
-            <strong className="max-w-[62%] truncate text-right">{workspace.branch}</strong>
+            <strong className="min-w-0 max-w-[62%] truncate text-right">{workspace.branch}</strong>
           </div>
         )}
       </div>
