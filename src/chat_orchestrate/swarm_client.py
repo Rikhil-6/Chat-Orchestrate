@@ -13,7 +13,6 @@ from .backends import (
     CODEX_BACKEND,
     GEMINI_CLI_BACKEND,
     SIMULATED_BACKEND,
-    backend_execution_hint,
     command_for_backend,
     detect_agent_backends,
     extract_response_text,
@@ -21,6 +20,7 @@ from .backends import (
 )
 from .config import Settings
 from .models import AgentSpec, ProgressUpdate, ProjectSpace
+from .scaffold import scaffold_project
 
 
 class SwarmClient:
@@ -97,6 +97,16 @@ class LocalPreviewSwarmClient(SwarmClient):
             agent=agent.name,
             role=agent.role,
         )
+        written = scaffold_project(project, goal, agent.role)
+        if written:
+            relative = [path.relative_to(project.path).as_posix() for path in written]
+            yield ProgressUpdate(
+                message="Preview fallback wrote workspace code: " + ", ".join(f"`{item}`" for item in relative[:6]),
+                phase="agent-output",
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=SIMULATED_BACKEND,
+            )
         yield await self.run_agent(agent, project, goal, context)
 
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
@@ -105,8 +115,8 @@ class LocalPreviewSwarmClient(SwarmClient):
             f"{agent.name} ({agent.role}) reviewed `{project.name}` {context_note}.\n\n"
             f"- Goal focus: {goal}\n"
             f"- Workspace: {project.path}\n"
-            f"- Recommended next move: keep the output scoped to this project space and hand "
-            f"off concrete findings to the next agent."
+            f"- Code fallback: generated or refreshed workspace artifacts where the task asked for an app, UI, or API.\n"
+            f"- Recommended next move: run the preview command and reconnect a real local CLI for deeper edits."
         )
 
 
@@ -177,11 +187,18 @@ class LocalAgentCliClient(SwarmClient):
                     yield f"`{backend}` API response\n\n{api_output}"
                     return
             if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
-                yield (
-                    f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
-                    f"Tried command: `{self._configured_command_label(backend)}`\n\n"
-                    f"{backend_execution_hint(backend)}"
+                yield ProgressUpdate(
+                    message=(
+                        f"{backend} is selected but not callable here. Tried `{self._configured_command_label(backend)}`; "
+                        "continuing with the local preview fallback so the workspace still gets visible code artifacts."
+                    ),
+                    phase="agent-warning",
+                    agent=agent.name,
+                    role=agent.role,
+                    preferred_backend=backend,
                 )
+                async for event in self.preview.run_agent_events(agent, project, goal, context):
+                    yield event
                 return
         async for event in self.preview.run_agent_events(agent, project, goal, context):
             yield event

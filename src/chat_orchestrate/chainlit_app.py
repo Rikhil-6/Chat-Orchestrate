@@ -423,7 +423,7 @@ async def on_message(message: cl.Message) -> None:
 
     if final_run:
         cl.user_session.set("last_run", final_run)
-    progress_message.content = "## Coordination Status\n\n- `ready` Response is ready. Live routing and worker details are in the dashboard."
+    progress_message.content = "## Coordination Status\n\n- `ready` Response is ready. Any generated code is listed below; live routing remains in the dashboard."
     await progress_message.update()
     response = conversational_response(final_run, turns)
     append_chat("assistant", "Assistant", response)

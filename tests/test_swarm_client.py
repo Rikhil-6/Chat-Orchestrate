@@ -64,3 +64,31 @@ async def test_cli_agent_streams_output_and_env_for_all_backends(
     assert any(event.phase == "agent-warning" and f"problem-{api_key}" in event.message for event in progress)
     assert f"chunk-{api_key}" in final
     assert "complete" in final
+
+
+@pytest.mark.asyncio
+async def test_selected_cli_failure_falls_back_to_visible_workspace_code(tmp_path: Path) -> None:
+    project = ProjectSpace("demo", tmp_path / "demo")
+    client = LocalAgentCliClient(
+        Settings(local_agent_timeout_seconds=1),
+        preferred_backend=CODEX_BACKEND,
+    )
+    client._command_for_backend = lambda backend_name: None
+
+    events = [
+        event
+        async for event in client.run_agent_events(
+            AgentSpec("Frontend", "frontend builder", ""),
+            project,
+            "build a website that looks like github",
+            "",
+        )
+    ]
+    progress = [event for event in events if isinstance(event, ProgressUpdate)]
+    final = next(event for event in reversed(events) if isinstance(event, str))
+
+    assert any(event.phase == "agent-warning" and "not callable" in event.message for event in progress)
+    assert any("wrote workspace code" in event.message for event in progress)
+    assert (project.path / "frontend" / "index.html").exists()
+    assert (project.path / "backend" / "app.py").exists()
+    assert "Code fallback" in final
