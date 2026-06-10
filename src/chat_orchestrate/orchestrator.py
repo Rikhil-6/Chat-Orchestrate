@@ -66,7 +66,7 @@ class Orchestrator:
         agent_names: list[str],
         coordination: CoordinationManager | None = None,
         delegated_task_wait_seconds: float = 30.0,
-        progress_interval_seconds: float = 5.0,
+        progress_interval_seconds: float = 3.0,
     ) -> None:
         self.client = client
         self.agents = [AGENT_LIBRARY[name] for name in agent_names if name in AGENT_LIBRARY]
@@ -121,26 +121,32 @@ class Orchestrator:
 
         context = ""
 
-        for agent in self.agents:
-            agent_context = f"{delegation_context}\n\n{context}".strip()
-            task = self._task_for_role(run, self._agent_key(agent))
-            yield self._agent_start_progress(agent, task, run)
-            output = ""
-            async for update in self.run_agent_with_progress(agent, project, goal, agent_context, task):
-                if isinstance(update, ProgressUpdate):
-                    yield update
-                else:
-                    output = update
-            turn = AgentTurn(
-                agent=agent.name,
-                role=agent.role,
-                content=output,
-                assigned_machine=self._assigned_machine_for_role(run, self._agent_key(agent)),
-                preferred_backend=self._preferred_backend_for_role(run, self._agent_key(agent)),
-            )
-            run.turns.append(turn)
-            context = self._append_context(context, turn)
-            yield turn
+        for batch in self._execution_batches(self.agents):
+            batch_context = f"{delegation_context}\n\n{context}".strip()
+            batch_turns: list[AgentTurn] = []
+            if len(batch) == 1:
+                async for event in self._execute_agent(batch[0], project, goal, batch_context, run):
+                    if isinstance(event, AgentTurn):
+                        batch_turns.append(event)
+                    yield event
+            else:
+                yield ProgressUpdate(
+                    message=(
+                        "Running independent role passes in parallel: "
+                        + ", ".join(f"`{self._agent_key(agent)}`" for agent in batch)
+                        + "."
+                    ),
+                    phase="parallel",
+                    role="coordinator",
+                    assigned_machine=run.orchestrator_machine,
+                )
+                async for event in self._execute_agent_batch(batch, project, goal, batch_context, run):
+                    if isinstance(event, AgentTurn):
+                        batch_turns.append(event)
+                    yield event
+            for turn in self._ordered_turns(batch, batch_turns):
+                run.turns.append(turn)
+                context = self._append_context(context, turn)
 
         run.final = self._summarize(run)
         yield ProgressUpdate(
@@ -150,6 +156,79 @@ class Orchestrator:
             assigned_machine=run.orchestrator_machine,
         )
         yield run
+
+    async def _execute_agent(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+        run: OrchestrationRun,
+    ) -> AsyncIterator[ProgressUpdate | AgentTurn]:
+        task = self._task_for_role(run, self._agent_key(agent))
+        yield self._agent_start_progress(agent, task, run)
+        output = ""
+        async for update in self.run_agent_with_progress(agent, project, goal, context, task):
+            if isinstance(update, ProgressUpdate):
+                yield update
+            else:
+                output = update
+        yield AgentTurn(
+            agent=agent.name,
+            role=agent.role,
+            content=output,
+            assigned_machine=self._assigned_machine_for_role(run, self._agent_key(agent)),
+            preferred_backend=self._preferred_backend_for_role(run, self._agent_key(agent)),
+        )
+
+    async def _execute_agent_batch(
+        self,
+        agents: list[AgentSpec],
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+        run: OrchestrationRun,
+    ) -> AsyncIterator[ProgressUpdate | AgentTurn]:
+        queue: asyncio.Queue[ProgressUpdate | AgentTurn | tuple[str, str]] = asyncio.Queue()
+
+        async def pipe_agent(agent: AgentSpec) -> None:
+            try:
+                async for event in self._execute_agent(agent, project, goal, context, run):
+                    await queue.put(event)
+            finally:
+                await queue.put(("done", self._agent_key(agent)))
+
+        tasks = [asyncio.create_task(pipe_agent(agent)) for agent in agents]
+        remaining = len(tasks)
+        while remaining:
+            item = await queue.get()
+            if isinstance(item, tuple) and item[0] == "done":
+                remaining -= 1
+                continue
+            yield item
+        await asyncio.gather(*tasks)
+
+    def _execution_batches(self, agents: list[AgentSpec]) -> list[list[AgentSpec]]:
+        by_key = {self._agent_key(agent): agent for agent in agents}
+        batches = []
+        if "coordinator" in by_key:
+            batches.append([by_key["coordinator"]])
+        primary_keys = ["researcher", "backend", "frontend", "engineer"]
+        primary = [by_key[key] for key in primary_keys if key in by_key]
+        if primary:
+            batches.append(primary)
+        finishing = [by_key[key] for key in ["reviewer", "documenter"] if key in by_key]
+        if finishing:
+            batches.append(finishing)
+        seen = {self._agent_key(agent) for batch in batches for agent in batch}
+        remaining = [agent for agent in agents if self._agent_key(agent) not in seen]
+        if remaining:
+            batches.append(remaining)
+        return batches
+
+    def _ordered_turns(self, agents: list[AgentSpec], turns: list[AgentTurn]) -> list[AgentTurn]:
+        order = {self._agent_key(agent): index for index, agent in enumerate(agents)}
+        return sorted(turns, key=lambda turn: order.get(turn.agent.lower(), len(order)))
 
     def _append_context(self, context: str, turn: AgentTurn) -> str:
         block = f"## {turn.agent} ({turn.role})\n{turn.content}"
@@ -307,6 +386,7 @@ class Orchestrator:
         task: DelegatedTask | None,
         elapsed: int,
         tick: int,
+        observed_task: DelegatedTask | None = None,
     ) -> ProgressUpdate:
         phase, activity = self._wait_activity(agent, task, tick)
         if task is None:
@@ -318,8 +398,17 @@ class Orchestrator:
                 elapsed_seconds=elapsed,
             )
         if self.coordination is not None and task.assigned_machine != self.coordination.machine_id:
+            status = observed_task.status if observed_task else task.status
+            if status == "running":
+                activity = "Remote worker has claimed the task and is running the local agent."
+            elif status == "failed":
+                activity = "Remote worker reported a failure; capturing the error for recovery."
+            elif status == "completed":
+                activity = "Remote worker finished; collecting the returned result."
+            elif status == "delegated":
+                activity = "Task is delegated but has not been claimed yet; checking worker availability."
             message = (
-                f"{activity} Waiting on `{task.assigned_machine}` for `{task.role}` "
+                f"{activity} Status `{status}` on `{task.assigned_machine}` for `{task.role}` "
                 f"via `{task.preferred_backend}`. Elapsed: {elapsed}s."
             )
         else:
@@ -392,6 +481,12 @@ class Orchestrator:
             return await self.client.run_agent(agent, project, goal, context)
 
         completed = await self._wait_for_delegated_task(task)
+        if completed and completed.status == "failed":
+            return (
+                f"`{completed.preferred_backend}` on `{completed.assigned_machine}` reported a tool-access failure "
+                f"while handling `{completed.role}`.\n\n"
+                f"{self._friendly_worker_failure(completed.result)}"
+            )
         if completed and completed.result:
             return f"`{completed.preferred_backend}` result from `{completed.assigned_machine}`\n\n{completed.result}"
         return (
@@ -399,6 +494,22 @@ class Orchestrator:
             "but no completed result came back before the local wait window ended. Make sure that "
             "machine is connected and has its UI or worker running with real local-agent execution enabled."
         )
+
+    def _friendly_worker_failure(self, result: str) -> str:
+        clean = result.strip()
+        lowered = clean.lower()
+        if "sandbox" in lowered or "rejected" in lowered or "permission" in lowered:
+            return (
+                "The machine is online, but its local agent could not access the project workspace or shell tools. "
+                "Restart that worker after pulling the latest code so Codex is launched with the project directory "
+                "and `workspace-write` sandbox, then run the task again."
+            )
+        if "not executable" in lowered or "not reachable" in lowered or "not found" in lowered:
+            return (
+                "The machine is online, but the selected local-agent command is not callable from that process. "
+                "Use Detect or set the command in Settings on that machine, then retry."
+            )
+        return clean or "The worker failed without returning details."
 
     async def run_agent_with_progress(
         self,
@@ -417,7 +528,10 @@ class Orchestrator:
                 break
             tick += 1
             elapsed = int(asyncio.get_running_loop().time() - started)
-            yield self._agent_wait_progress(agent, task, elapsed, tick)
+            observed_task = None
+            if task is not None and self.coordination is not None:
+                observed_task = await asyncio.to_thread(self.coordination.get_task, task.task_id)
+            yield self._agent_wait_progress(agent, task, elapsed, tick, observed_task)
         yield await work
 
     async def _wait_for_delegated_task(self, task: DelegatedTask) -> DelegatedTask | None:

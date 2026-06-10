@@ -135,7 +135,7 @@ The AI delegation pass records role-specific tasks against available machines an
 
 Chainlit also shows a compact **Cluster Roster** plus a **Machine Status** panel on startup. The roster is updated as you interact with the app and shows each connected machine, status, role, agent backends, and the currently selected local chat backend. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 
-Use **Host Coordinator** or `/host-coordinator` on one running machine to start the shared HTTP coordinator from the UI. It generates a token and prints a copyable connection pack. It is the button version of:
+Use **Host Coordinator** or `/host-coordinator` on one running machine to start the shared HTTP coordinator from the UI. The UI asks for a human project/session name, turns it into a cluster id such as `google-site-a3f9`, generates a fresh token, and prints a copyable connection pack. It is the button version of:
 
 ```powershell
 .\scripts\run_coordinator.ps1 -HostName 0.0.0.0 -Port 8765 -ClusterId friends-project -Token "share-this-out-of-band"

@@ -1,6 +1,15 @@
 from pathlib import Path
 
-from chat_orchestrate.backends import CODEX_BACKEND, command_for_backend, discover_backend_commands, extract_response_text, run_task
+from chat_orchestrate.backends import (
+    CLAUDE_CODE_BACKEND,
+    CODEX_BACKEND,
+    GEMINI_CLI_BACKEND,
+    command_for_backend,
+    discover_backend_commands,
+    extract_response_text,
+    run_task,
+    task_command_args,
+)
 from chat_orchestrate.coordination import CoordinationManager
 from chat_orchestrate.models import ProjectSpace
 
@@ -139,6 +148,54 @@ def test_discover_backend_commands_finds_nested_candidate(tmp_path: Path, monkey
     monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "pf86"))
 
     assert str(executable) in discover_backend_commands(CODEX_BACKEND)
+
+
+def test_task_command_args_give_codex_workspace_write_access(tmp_path: Path) -> None:
+    args = task_command_args(CODEX_BACKEND, "codex", "do work", tmp_path)
+
+    assert args == [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "--cd",
+        str(tmp_path),
+        "do work",
+    ]
+
+
+def test_task_command_args_give_claude_workspace_access(tmp_path: Path) -> None:
+    args = task_command_args(CLAUDE_CODE_BACKEND, "claude", "do work", tmp_path)
+
+    assert args == [
+        "claude",
+        "--add-dir",
+        str(tmp_path),
+        "--permission-mode",
+        "acceptEdits",
+        "-p",
+        "do work",
+    ]
+
+
+def test_task_command_args_give_gemini_supported_workspace_options(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chat_orchestrate.backends.command_help_text",
+        lambda command: "--include-directories <dirs> --approval-mode <mode>",
+    )
+
+    args = task_command_args(GEMINI_CLI_BACKEND, "gemini", "do work", tmp_path)
+
+    assert args == [
+        "gemini",
+        "--include-directories",
+        str(tmp_path),
+        "--approval-mode",
+        "auto_edit",
+        "-p",
+        "do work",
+    ]
 
 
 def test_windows_store_codex_resource_is_not_treated_as_cli(tmp_path: Path, monkeypatch) -> None:

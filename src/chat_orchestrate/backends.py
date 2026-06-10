@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
@@ -71,6 +72,7 @@ def run_task(
     command_overrides: dict[str, str] | None = None,
     openai_api_key: str = "",
     codex_api_model: str = "gpt-5.3-codex",
+    workspaces_root: Path | None = None,
 ) -> str:
     if dry_run or task.preferred_backend == SIMULATED_BACKEND:
         return (
@@ -90,27 +92,72 @@ def run_task(
             f"{backend_execution_hint(task.preferred_backend)}"
         )
 
+    workspace_path = task_workspace_path(task, workspaces_root)
+    workspace_line = f"Project space path: {workspace_path}\n" if workspace_path else ""
     prompt = (
         f"You are the `{task.role}` agent for a distributed project run.\n\n"
         f"Task: {task.title}\n"
         f"Project space: {task.project}\n"
+        f"{workspace_line}"
         f"Goal:\n{task.goal}\n\n"
         "Return a concrete, useful result for your assigned role. If this is implementation work, describe "
         "the exact files, commands, or code changes you would make or have made."
     )
 
-    if task.preferred_backend == CODEX_BACKEND:
-        args = [command, "exec", "--skip-git-repo-check", prompt]
-    elif task.preferred_backend == CLAUDE_CODE_BACKEND:
-        args = [command, "-p", prompt]
-    elif task.preferred_backend == GEMINI_CLI_BACKEND:
-        args = [command, "-p", prompt]
-    else:
+    args = task_command_args(task.preferred_backend, command, prompt, workspace_path)
+    if args is None:
         return f"Backend `{task.preferred_backend}` has no command runner yet."
 
-    result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180)
+    result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180, cwd=workspace_path)
     output = result.stdout.strip() or result.stderr.strip()
     return output or f"`{task.preferred_backend}` exited with code {result.returncode}."
+
+
+def task_command_args(backend: str, command: str, prompt: str, workspace_path: Path | None = None) -> list[str] | None:
+    if backend == CODEX_BACKEND:
+        args = [command, "exec", "--skip-git-repo-check", "--sandbox", "workspace-write"]
+        if workspace_path:
+            args.extend(["--cd", str(workspace_path)])
+        args.append(prompt)
+        return args
+
+    if backend == CLAUDE_CODE_BACKEND:
+        args = [command]
+        if workspace_path:
+            args.extend(["--add-dir", str(workspace_path), "--permission-mode", "acceptEdits"])
+        args.extend(["-p", prompt])
+        return args
+
+    if backend == GEMINI_CLI_BACKEND:
+        args = [command]
+        if workspace_path and command_supports_option(command, "--include-directories"):
+            args.extend(["--include-directories", str(workspace_path)])
+        if command_supports_option(command, "--approval-mode"):
+            args.extend(["--approval-mode", "auto_edit"])
+        args.extend(["-p", prompt])
+        return args
+
+    return None
+
+
+def task_workspace_path(task: DelegatedTask, workspaces_root: Path | None = None) -> Path | None:
+    if not workspaces_root:
+        return None
+    candidate = (workspaces_root / task.project).resolve()
+    return candidate if candidate.exists() and candidate.is_dir() else None
+
+
+def command_supports_option(command: str, option: str) -> bool:
+    return option in command_help_text(command)
+
+
+@lru_cache(maxsize=32)
+def command_help_text(command: str) -> str:
+    try:
+        result = subprocess.run([command, "--help"], capture_output=True, text=True, check=False, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return f"{result.stdout}\n{result.stderr}"
 
 
 def run_codex_api_task(task: DelegatedTask, api_key: str, model: str) -> str:

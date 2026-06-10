@@ -128,6 +128,7 @@ async def ui_worker_loop() -> None:
                 load_command_overrides(),
                 load_openai_api_key(),
                 settings.codex_api_model,
+                settings.workspaces_root,
             )
         except Exception as exc:  # pragma: no cover - defensive UI worker boundary
             try:
@@ -258,7 +259,7 @@ async def on_message(message: cl.Message) -> None:
 
     if final_run:
         cl.user_session.set("last_run", final_run)
-    progress_message.content = "## Coordination Status\n\nReady with the response. Details are tucked into the dashboard."
+    progress_message.content = "## Coordination Status\n\n- `ready` Response is ready. Live routing and worker details are in the dashboard."
     await progress_message.update()
     response = conversational_response(final_run, turns)
     append_chat("assistant", "Assistant", response)
@@ -319,10 +320,10 @@ async def on_settings_update(updated_settings: dict) -> None:
 def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
     goal = run.goal if run else str(cl.user_session.get("last_goal") or "")
     if is_lightweight_chat(goal):
-        return "Hey, I’m here. Send me what you want the agents to work on, and I’ll keep the coordination details in the dashboard."
+        return "Hey, I'm here. Send me what you want the agents to work on, and I'll keep the coordination details in the dashboard."
 
     if not turns:
-        return "I’m on it. I’ve updated the dashboard with the current coordination state."
+        return "I'm on it. I've updated the dashboard with the current coordination state."
 
     preferred_roles = ["engineer", "backend", "frontend", "coordinator", "researcher", "reviewer", "documenter"]
     chosen = turns[-1]
@@ -334,10 +335,12 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
 
     content = brief_agent_chat_content(chosen.content)
     if not content:
-        content = "Done. I’ve updated the dashboard with the current coordination state."
+        content = "Done. I've updated the dashboard with the current coordination state."
 
     if run and run.delegated_tasks:
-        return f"{content}\n\nI’ve tucked the machine routing and task details into the dashboard."
+        if worker_result_needs_recovery(content):
+            return content
+        return f"{content}\n\nI've kept the machine routing and task details in the dashboard."
     return content
 
 
@@ -406,12 +409,27 @@ def is_lightweight_chat(goal: str) -> bool:
 
 def brief_agent_chat_content(content: str) -> str:
     clean_content = clean_agent_chat_content(content)
+    if worker_result_needs_recovery(clean_content):
+        return clean_content
     skipped = {"workstreams", "dependencies", "success", "validation", "routing"}
     for line in clean_content.splitlines():
         clean = line.strip(" -")
         if clean and clean.lower().rstrip(":") not in skipped:
             return clean
     return ""
+
+
+def worker_result_needs_recovery(content: str) -> bool:
+    lowered = content.lower()
+    return any(
+        marker in lowered
+        for marker in [
+            "reported a tool-access failure",
+            "could not access the project workspace",
+            "selected local-agent command is not callable",
+            "no completed result came back",
+        ]
+    )
 
 
 def clean_agent_chat_content(content: str) -> str:
@@ -1181,11 +1199,22 @@ async def host_coordinator() -> None:
         stop_hosted_coordinator()
         hosted_connection = {}
 
-    await cl.Message(content="Starting a coordinator on this machine...").send()
-    default_cluster = settings.cluster_id if settings.cluster_id != "local" else "friends-project"
-    cluster_id = default_cluster
+    default_project_name = default_host_project_name()
+    project_name = await ask_text(
+        "Project/session name for this hosted coordinator. A short random suffix will be added automatically.",
+        default_project_name,
+    )
+    if project_name is None:
+        return
+    cluster_id = hosted_cluster_id(project_name)
     token = secrets.token_urlsafe(24)
     port = find_available_port(settings.coordinator_port)
+    await cl.Message(
+        content=(
+            "Starting a coordinator on this machine...\n\n"
+            f"Hosted project: `{cluster_id}`"
+        )
+    ).send()
     if port != settings.coordinator_port:
         await cl.Message(
             content=(
@@ -1992,6 +2021,27 @@ def local_coordinator_urls(port: int) -> list[str]:
     if not addresses:
         addresses = ["127.0.0.1"]
     return [f"http://{address}:{port}" for address in addresses]
+
+
+def default_host_project_name() -> str:
+    project = cl.user_session.get("project_space")
+    if project is not None and getattr(project, "name", ""):
+        return str(project.name)
+    if settings.cluster_id and settings.cluster_id != "local":
+        return re.sub(r"-[0-9a-fA-F]{3,4}$", "", settings.cluster_id)
+    return "friends-project"
+
+
+def hosted_cluster_id(project_name: str, suffix: str | None = None) -> str:
+    base = slugify_project_name(project_name)
+    suffix = suffix or secrets.token_hex(2)
+    return f"{base}-{suffix.lower()[:4]}"
+
+
+def slugify_project_name(project_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", project_name.strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "project"
 
 
 def hosted_state_path(cluster_id: str, port: int) -> Path:

@@ -79,6 +79,7 @@ async def run_worker(settings: Settings | None = None) -> None:
                 command_overrides=settings.command_overrides,
                 openai_api_key=settings.openai_api_key,
                 codex_api_model=settings.codex_api_model,
+                workspaces_root=settings.workspaces_root,
             )
         except Exception as exc:  # pragma: no cover - defensive worker boundary
             try:
