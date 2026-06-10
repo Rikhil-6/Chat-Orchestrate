@@ -94,11 +94,21 @@ def run_task(
 
     workspace_path = task_workspace_path(task, workspaces_root)
     workspace_line = f"Project space path: {workspace_path}\n" if workspace_path else ""
+    write_contract = (
+        "Workspace write contract:\n"
+        "- Treat the project space path as read-write for this assigned task.\n"
+        "- If implementation is requested, create or update files there instead of only planning.\n"
+        "- If the workspace is empty, scaffold a greenfield app or monorepo structure there.\n"
+        "- Do not claim the session is read-only unless an actual write attempt fails; if it fails, report the "
+        "exact path, command, and error.\n"
+        "- Return the files changed plus the commands needed to preview or verify the work.\n\n"
+    )
     prompt = (
         f"You are the `{task.role}` agent for a distributed project run.\n\n"
         f"Task: {task.title}\n"
         f"Project space: {task.project}\n"
         f"{workspace_line}"
+        f"{write_contract}"
         f"Goal:\n{task.goal}\n\n"
         "Return a concrete, useful result for your assigned role. If this is implementation work, describe "
         "the exact files, commands, or code changes you would make or have made."
@@ -146,6 +156,7 @@ def task_workspace_path(task: DelegatedTask, workspaces_root: Path | None = None
     if not workspaces_root:
         return None
     candidate = (workspaces_root / task.project).resolve()
+    candidate.mkdir(parents=True, exist_ok=True)
     return candidate if candidate.exists() and candidate.is_dir() else None
 
 

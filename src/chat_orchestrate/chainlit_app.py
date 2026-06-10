@@ -42,7 +42,7 @@ from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
 from chat_orchestrate.summaries import summarize_goal
-from chat_orchestrate.swarm_client import build_swarm_client
+from chat_orchestrate.swarm_client import build_swarm_client, workspace_write_contract
 from chat_orchestrate.ui_state import (
     append_chat,
     clear_chat_history,
@@ -199,6 +199,7 @@ async def run_claimed_ui_task_buffered(task, status_message: cl.Message | None) 
 
 async def run_claimed_ui_task_live(task, status_message: cl.Message | None) -> str:
     workspace_path = task_workspace_path(task, settings.workspaces_root) or (settings.workspaces_root / task.project)
+    workspace_path.mkdir(parents=True, exist_ok=True)
     project = ProjectSpace(name=task.project, path=workspace_path)
     agent = AgentSpec(
         name=task.role.replace("-", " ").title(),
@@ -210,6 +211,7 @@ async def run_claimed_ui_task_live(task, status_message: cl.Message | None) -> s
         f"Task: {task.title}\n"
         f"Project space: {task.project}\n"
         f"Project path: {workspace_path}\n\n"
+        f"{workspace_write_contract(project)}\n\n"
         f"Goal:\n{task.goal}\n\n"
         "Work concretely in the project space when possible. Surface blockers, sandbox/tool errors, "
         "files changed, commands run, and preview or verification details."
@@ -301,6 +303,26 @@ def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0
     return "\n".join(lines)
 
 
+def ensure_project_space(name: str) -> ProjectSpace:
+    clean_name = slugify_project_name(name or "default")
+    try:
+        return spaces.get(clean_name)
+    except ProjectSpaceError:
+        return spaces.upsert(clean_name, clean_name)
+
+
+def initial_project_space() -> ProjectSpace:
+    preferences = load_preferences()
+    preferred = str(preferences.get("project_name", "")).strip()
+    if preferred:
+        return ensure_project_space(preferred)
+
+    existing = spaces.list_spaces()
+    if existing:
+        return existing[0]
+    return ensure_project_space("default")
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     cl.user_session.set("last_goal", "")
@@ -320,14 +342,10 @@ async def on_chat_start() -> None:
         else:
             await cl.Message(content=f"Coordination error: {exc}").send()
             return
-    existing = spaces.list_spaces()
-    if existing:
-        cl.user_session.set("project_space", existing[0])
-        active = f"`{existing[0].name}`"
-    else:
-        default_space = spaces.upsert("default", "default")
-        cl.user_session.set("project_space", default_space)
-        active = "`default`"
+    project = initial_project_space()
+    cl.user_session.set("project_space", project)
+    active = f"`{project.name}`"
+    save_preferences({"project_name": project.name})
 
     await setup_chat_settings()
     start_ui_worker()
@@ -435,6 +453,11 @@ async def on_message(message: cl.Message) -> None:
 async def on_settings_update(updated_settings: dict) -> None:
     backend = normalize_selected_backend(str(updated_settings.get("agent_backend", "Select")))
     restore_history = bool(updated_settings.get("restore_history", True))
+    project_name = slugify_project_name(str(updated_settings.get("project_name", "") or "default"))
+    current_project = cl.user_session.get("project_space")
+    if not current_project or current_project.name != project_name:
+        current_project = ensure_project_space(project_name)
+        cl.user_session.set("project_space", current_project)
     visible_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
     visible_command = clean_command_input(updated_settings.get("codex_command", ""))
     openai_api_key = visible_api_key if backend == CODEX_BACKEND else clean_secret_input(updated_settings.get("openai_api_key", ""))
@@ -471,6 +494,7 @@ async def on_settings_update(updated_settings: dict) -> None:
     save_preferences(
         {
             "agent_backend": backend,
+            "project_name": current_project.name,
             "restore_history": str(restore_history).lower(),
             "codex_command": codex_command,
             "claude_command": claude_command,
@@ -674,23 +698,27 @@ async def handle_command(text: str) -> None:
         elif command == "/use" and len(parts) == 2:
             project = spaces.get(parts[1])
             cl.user_session.set("project_space", project)
+            save_preferences({"project_name": project.name})
             await cl.Message(content=f"Active project space set to `{project.name}`.").send()
         elif command == "/create-space" and len(parts) >= 3:
             name = parts[1]
             path = " ".join(parts[2:])
             project = spaces.upsert(name, path)
             cl.user_session.set("project_space", project)
+            save_preferences({"project_name": project.name})
             await cl.Message(content=f"Created and selected `{project.name}` at `{project.path}`.").send()
         elif command == "/worktree" and len(parts) >= 4:
             name, repo_path, branch = parts[1], parts[2], parts[3]
             project = spaces.create_worktree(name, repo_path, branch)
             cl.user_session.set("project_space", project)
+            save_preferences({"project_name": project.name})
             await cl.Message(content=f"Created worktree `{project.name}` at `{project.path}`.").send()
         elif command == "/clone" and len(parts) >= 3:
             name, git_url = parts[1], parts[2]
             branch = parts[3] if len(parts) >= 4 else None
             project = spaces.clone_repository(name, git_url, branch)
             cl.user_session.set("project_space", project)
+            save_preferences({"project_name": project.name})
             await cl.Message(content=f"Cloned and selected `{project.name}` at `{project.path}`.").send()
         elif command == "/workspace-modes":
             await show_workspace_modes()
@@ -753,6 +781,8 @@ async def show_spaces() -> None:
 async def setup_chat_settings(selected_backend: str | None = None) -> None:
     preferences = load_preferences()
     credentials = load_credentials()
+    project = cl.user_session.get("project_space")
+    project_name = project.name if project else slugify_project_name(preferences.get("project_name", "default"))
     restore_history = preferences.get("restore_history", "true").lower() != "false"
     codex_credentials = credentials.get(CODEX_BACKEND, {})
     claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
@@ -816,12 +846,20 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
     refresh_advertised_backends(selected_backend)
     save_preferences(
         {
+            "project_name": project_name,
             "codex_command": codex_command,
             "claude_command": claude_command,
             "gemini_command": gemini_command,
         }
     )
     widgets = [
+        TextInput(
+            id="project_name",
+            label="Project Space Name",
+            initial=project_name,
+            placeholder="my-project",
+            tooltip="Creates or selects a writable project folder under the local workspaces directory.",
+        ),
         Select(
             id="agent_backend",
             label="Local Agent",

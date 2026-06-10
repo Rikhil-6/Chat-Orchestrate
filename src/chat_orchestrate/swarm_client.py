@@ -23,6 +23,18 @@ from .models import AgentSpec, ProgressUpdate, ProjectSpace
 from .scaffold import scaffold_project
 
 
+def workspace_write_contract(project: ProjectSpace) -> str:
+    return (
+        "Workspace write contract:\n"
+        f"- Treat `{project.path}` as the read-write project workspace for `{project.name}`.\n"
+        "- If implementation is requested, create or update files in that workspace instead of only planning.\n"
+        "- If the workspace is empty, scaffold a greenfield app or monorepo structure there.\n"
+        "- Do not claim the session is read-only unless an actual write attempt fails; if it fails, report the "
+        "exact path, command, and error.\n"
+        "- Return the files changed plus the commands needed to preview or verify the work."
+    )
+
+
 class SwarmClient:
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
         raise NotImplementedError
@@ -54,6 +66,7 @@ class OpenSwarmClient(SwarmClient):
             f"Project space: {project.name}\n"
             f"Path: {project.path}\n"
             f"Branch: {project.branch or 'unknown'}\n\n"
+            f"{workspace_write_contract(project)}\n\n"
             f"Goal:\n{goal}\n\n"
             f"Context from prior agents:\n{context or 'No prior context.'}"
         )
@@ -172,7 +185,16 @@ class LocalAgentCliClient(SwarmClient):
                     yield event
                     continue
                 if event:
-                    yield f"`{backend}` local response\n\n{event}"
+                    recovery = self._recover_workspace_artifacts(project, goal, agent.role, event)
+                    if recovery:
+                        yield ProgressUpdate(
+                            message=recovery,
+                            phase="agent-output",
+                            agent=agent.name,
+                            role=agent.role,
+                            preferred_backend=backend,
+                        )
+                    yield f"`{backend}` local response\n\n{event}{self._recovery_note(recovery)}"
                     return
             if backend == CODEX_BACKEND:
                 yield ProgressUpdate(
@@ -184,7 +206,16 @@ class LocalAgentCliClient(SwarmClient):
                 )
                 api_output = await self._run_codex_api(prompt)
                 if api_output:
-                    yield f"`{backend}` API response\n\n{api_output}"
+                    recovery = self._recover_workspace_artifacts(project, goal, agent.role, api_output)
+                    if recovery:
+                        yield ProgressUpdate(
+                            message=recovery,
+                            phase="agent-output",
+                            agent=agent.name,
+                            role=agent.role,
+                            preferred_backend=backend,
+                        )
+                    yield f"`{backend}` API response\n\n{api_output}{self._recovery_note(recovery)}"
                     return
             if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
                 yield ProgressUpdate(
@@ -210,6 +241,7 @@ class LocalAgentCliClient(SwarmClient):
             "Be concrete, linguistic, and useful. If the user asks for implementation, propose or perform "
             "specific work inside the project space. If distributed coordination context assigns work to "
             "another machine, respect that assignment and focus on your own role.\n\n"
+            f"{workspace_write_contract(project)}\n\n"
             f"Project space: {project.name}\n"
             f"Path: {project.path}\n"
             f"Branch: {project.branch or 'unknown'}\n\n"
@@ -242,6 +274,18 @@ class LocalAgentCliClient(SwarmClient):
             yield ProgressUpdate(
                 message=f"{backend} command is not reachable from this app process.",
                 phase="agent-warning",
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=backend,
+            )
+            yield ""
+            return
+        try:
+            project.path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            yield ProgressUpdate(
+                message=f"Could not prepare project workspace `{project.path}`: {exc}",
+                phase="agent-error",
                 agent=agent.name,
                 role=agent.role,
                 preferred_backend=backend,
@@ -435,6 +479,32 @@ class LocalAgentCliClient(SwarmClient):
         if len(clean) <= limit:
             return clean
         return f"{clean[: limit - 1]}..."
+
+    def _recover_workspace_artifacts(self, project: ProjectSpace, goal: str, role: str, output: str) -> str:
+        lowered = output.lower()
+        blocked = any(
+            marker in lowered
+            for marker in [
+                "read-only",
+                "read only",
+                "cannot create files",
+                "can't create files",
+                "cannot modify",
+                "can't modify",
+                "could not modify",
+                "could not create",
+            ]
+        )
+        if not blocked:
+            return ""
+        written = scaffold_project(project, goal, role)
+        if not written:
+            return ""
+        relative = [path.relative_to(project.path).as_posix() for path in written]
+        return "Workspace recovery wrote visible code artifacts: " + ", ".join(f"`{item}`" for item in relative[:8])
+
+    def _recovery_note(self, recovery: str) -> str:
+        return f"\n\n{recovery}" if recovery else ""
 
     def _backend_env(self, backend: str) -> dict[str, str]:
         env = os.environ.copy()
