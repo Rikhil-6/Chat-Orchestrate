@@ -149,6 +149,46 @@ function SessionStatus({ overview }) {
   return null;
 }
 
+function ProjectSpaceCard({ workspace }) {
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold">Project Space</div>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Set the active project name before asking agents to write code.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => action("set_project_space")}>
+          Set Project
+        </Button>
+      </div>
+      <div className="mt-3 grid gap-2 text-xs">
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Name</span>
+          <strong className="max-w-[62%] truncate text-right">{workspace.name || "default"}</strong>
+        </div>
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Folder</span>
+          <strong className="max-w-[62%] truncate text-right" title={workspace.path || ""}>
+            {workspace.path || "workspaces/default"}
+          </strong>
+        </div>
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Mode</span>
+          <strong className="text-right">{workspace.mode || "local"}</strong>
+        </div>
+        {workspace.branch && (
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Branch</span>
+            <strong className="max-w-[62%] truncate text-right">{workspace.branch}</strong>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function FlowCard({ title, body, accent }) {
   return (
     <div className="rounded-md border bg-card p-3">
@@ -301,6 +341,7 @@ export default function HarnessDashboard() {
           <Stat label="Workspace" value={workspace.name || "default"} />
           <Stat label="Coordination" value={overview.coordination_backend || "file"} />
         </div>
+        <ProjectSpaceCard workspace={workspace} />
         <SessionStatus overview={overview} />
       </section>
 
@@ -483,6 +524,9 @@ export default function HarnessDashboard() {
         </Button>
         <Button variant="outline" onClick={() => action("show_backends")}>
           <Settings className="mr-2 h-4 w-4" /> Agents
+        </Button>
+        <Button variant="outline" onClick={() => action("set_project_space")}>
+          <FileCode2 className="mr-2 h-4 w-4" /> Project
         </Button>
         <Button variant="outline" onClick={() => action("auto_detect_agents")}>
           <Search className="mr-2 h-4 w-4" /> Detect

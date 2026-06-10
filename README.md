@@ -87,10 +87,13 @@ Project spaces are kept under `WORKSPACES_ROOT` unless an absolute path is suppl
 ./workspaces
 ```
 
+The dashboard has a **Project Space** card with a **Set Project** button. Use it to choose a human project name before asking agents to write code; the app creates/selects a writable folder such as `./workspaces/mock-google-site` and saves that choice locally. The same flow is available from the **Project** action or `/project`.
+
 In chat, use commands like:
 
 ```text
 /spaces
+/project
 /use my-app
 /create-space my-app C:\code\my-app
 /worktree my-app C:\code\my-app feature/agent-pass

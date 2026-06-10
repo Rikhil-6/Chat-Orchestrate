@@ -695,6 +695,8 @@ async def handle_command(text: str) -> None:
             await restart_app()
         elif command == "/spaces":
             await show_spaces()
+        elif command in {"/project", "/set-project"}:
+            await set_project_space()
         elif command == "/use" and len(parts) == 2:
             project = spaces.get(parts[1])
             cl.user_session.set("project_space", project)
@@ -776,6 +778,31 @@ async def show_spaces() -> None:
         for space in items
     ]
     await cl.Message(content="## Project Spaces\n\n" + "\n".join(lines)).send()
+
+
+async def set_project_space() -> None:
+    current = cl.user_session.get("project_space")
+    default_name = current.name if current else slugify_project_name(load_preferences().get("project_name", "default"))
+    project_name = await ask_text(
+        "Project space name. This creates or selects a writable folder under the local workspaces directory.",
+        default_name,
+    )
+    if project_name is None:
+        return
+
+    project = ensure_project_space(project_name)
+    cl.user_session.set("project_space", project)
+    save_preferences({"project_name": project.name})
+    await setup_chat_settings()
+    await cl.Message(
+        content=(
+            "## Project Space Set\n\n"
+            f"Active project: `{project.name}`\n\n"
+            f"Writable folder: `{project.path}`\n\n"
+            "Agents will use this workspace for generated files, previews, and handoffs."
+        )
+    ).send()
+    await show_dashboard_sidebar()
 
 
 async def setup_chat_settings(selected_backend: str | None = None) -> None:
@@ -1671,6 +1698,11 @@ async def show_tasks_action(_: cl.Action) -> None:
     await show_tasks()
 
 
+@cl.action_callback("set_project_space")
+async def set_project_space_action(_: cl.Action) -> None:
+    await set_project_space()
+
+
 @cl.action_callback("show_artifacts")
 async def show_artifacts_action(_: cl.Action) -> None:
     await show_artifacts()
@@ -1782,6 +1814,13 @@ def machine_actions() -> list[cl.Action]:
             label="Artifacts",
             tooltip="Show generated project files and preview commands.",
             icon="file-code-2",
+            payload={},
+        ),
+        cl.Action(
+            name="set_project_space",
+            label="Project",
+            tooltip="Set the active project space name.",
+            icon="folder",
             payload={},
         ),
         cl.Action(
@@ -2282,6 +2321,7 @@ def command_help() -> str:
         "- `/detect-agents`\n"
         "- `/restart-app`\n"
         "- `/spaces`\n"
+        "- `/project` or `/set-project`\n"
         "- `/use <name>`\n"
         "- `/create-space <name> <path>`\n"
         "- `/worktree <name> <repo-path> <branch>`\n"
