@@ -21,6 +21,15 @@
   padding: 3px 7px;
 }
 
+#chat-orchestrate-panel-rail,
+.chat-orchestrate-panel-rail,
+[data-chat-orchestrate-panel-rail],
+button[title*="Toggle harness dashboard" i],
+button[aria-label*="Toggle harness dashboard" i] {
+  display: none !important;
+  pointer-events: none !important;
+}
+
 div[data-panel-group-direction="horizontal"] > div[data-panel]:has([data-harness-dashboard="true"]) {
   order: -10;
   min-width: 320px;

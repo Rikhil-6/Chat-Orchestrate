@@ -2,7 +2,7 @@
   const staleRailId = "chat-orchestrate-panel-rail";
   const staleRailStyleId = "chat-orchestrate-panel-rail-style";
   const styleId = "chat-orchestrate-sidebar-polish-style";
-  const polishVersion = "sidebar-polish-17";
+  const polishVersion = "sidebar-polish-18";
 
   if (window.__chatOrchestrateSidebarPolishVersion === polishVersion) return;
   window.__chatOrchestrateSidebarPolishVersion = polishVersion;
@@ -45,8 +45,53 @@
         display: none !important;
         pointer-events: none !important;
       }
+      #chat-orchestrate-panel-rail,
+      .chat-orchestrate-panel-rail,
+      [data-chat-orchestrate-panel-rail],
+      button[title*="Toggle harness dashboard" i],
+      button[aria-label*="Toggle harness dashboard" i] {
+        display: none !important;
+        pointer-events: none !important;
+      }
     `;
     document.head.appendChild(style);
+  }
+
+  function legacyToggleButton(element) {
+    if (!element) return false;
+    const value = [
+      element.getAttribute("title"),
+      element.getAttribute("aria-label"),
+      element.textContent,
+    ]
+      .join(" ")
+      .toLowerCase();
+    return value.includes("toggle harness dashboard") || value.includes("toggle settings panel");
+  }
+
+  function legacyRailContainer(element) {
+    let current = element;
+    for (let depth = 0; depth < 5 && current; depth += 1) {
+      const rect = current.getBoundingClientRect();
+      const compact = rect.width > 0 && rect.width <= 260 && rect.height > 0 && rect.height <= 96;
+      const nearHeader = rect.top <= 120;
+      const hasLegacyToggle = Array.from(current.querySelectorAll("button, [role='button'], a")).some(legacyToggleButton);
+      if (compact && nearHeader && hasLegacyToggle) return current;
+      current = current.parentElement;
+    }
+    return element;
+  }
+
+  function removeLegacyPanelRail() {
+    document.getElementById(staleRailId)?.remove();
+    document.getElementById(staleRailStyleId)?.remove();
+    document.querySelectorAll(".chat-orchestrate-panel-rail, [data-chat-orchestrate-panel-rail]").forEach((element) => {
+      element.remove();
+    });
+    document.querySelectorAll("button, [role='button'], a").forEach((element) => {
+      if (!legacyToggleButton(element)) return;
+      legacyRailContainer(element).remove();
+    });
   }
 
   function renameSidebarTitle() {
@@ -165,7 +210,7 @@
 
   function polish() {
     addStyle();
-    document.getElementById(staleRailId)?.remove();
+    removeLegacyPanelRail();
     renameSidebarTitle();
     polishSidebarCloseButtons();
     polishSettingsFields();

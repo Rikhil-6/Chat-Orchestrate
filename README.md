@@ -59,7 +59,7 @@ The Chainlit sidebar includes a **Local Agent** selector so you can choose `code
 
 Machine capability tags are computed, not hand-authored. The coordinator infers roles from the selected local agent, detected tool readiness, the default agent set, and the current chat goal. A prompt that asks for a backend here and frontend on another machine should advertise and route `backend`/`frontend` work differently from a prompt that only asks for review or documentation.
 
-On startup, the app opens a **Harness Dashboard** side panel with live machines, local execution policy, workspace details, and repo-consolidation flow. The chat bar remains the place to talk to the local/coordinating agent. Use `/dashboard`, the **Dashboard** action, or the floating **Dashboard / Settings** switcher to reopen panels after closing them.
+On startup, the app opens a **Harness Dashboard** side panel with live machines, local execution policy, workspace details, and repo-consolidation flow. The chat bar remains the place to talk to the local/coordinating agent. Use `/dashboard` or the **Dashboard** action to refresh the panel; settings stay in Chainlit's header/sidebar controls.
 
 Generated project code is indexed from the active workspace and shown in **Project Artifacts** on the dashboard. You can also ask `/artifacts` to see the concrete files and preview command in chat. For the default Google-like demo workspace, run:
 
