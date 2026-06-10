@@ -61,6 +61,20 @@ Machine capability tags are computed, not hand-authored. The coordinator infers 
 
 On startup, the app opens a **Harness Dashboard** side panel with live machines, local execution policy, workspace details, and repo-consolidation flow. The chat bar remains the place to talk to the local/coordinating agent. Use `/dashboard`, the **Dashboard** action, or the floating **Dashboard / Settings** switcher to reopen panels after closing them.
 
+Generated project code is indexed from the active workspace and shown in **Project Artifacts** on the dashboard. You can also ask `/artifacts` to see the concrete files and preview command in chat. For the default Google-like demo workspace, run:
+
+```powershell
+.\scripts\preview_workspace.ps1 -Workspace default
+```
+
+or on macOS/Linux:
+
+```sh
+./scripts/preview_workspace.sh --workspace default
+```
+
+That starts the generated FastAPI backend and a local frontend preview, then prints URLs such as `http://localhost:5173` and `/api/search?q=python`.
+
 Selecting an agent is separate from being ready to execute it. Codex and Claude Code should be signed in through their normal local CLI flows and launched from a terminal where `codex` or `claude` is on `PATH`, or configured with a full command path in the sidebar. A signed-in desktop app can be launched for setup, but the harness cannot reuse a GUI-only desktop session as a headless worker unless a callable CLI/API path is also available. If Codex CLI is unavailable, saving an OpenAI API key in the sidebar enables the Codex API fallback.
 
 Use **Auto-detect Agents** or `/detect-agents` to scan PATH plus common npm, user-local, WindowsApps, Homebrew, and local bin install locations for `codex` and `claude`. If you installed a command after the app started or changed terminal PATH, use **Restart App** or `/restart-app`; when launched through `scripts/run_local.py`, the supervisor relaunches the UI and worker automatically.

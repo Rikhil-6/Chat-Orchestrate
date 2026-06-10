@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Cpu,
+  ExternalLink,
+  FileCode2,
   GitBranch,
   Handshake,
   ListChecks,
@@ -181,6 +183,58 @@ function EmptyPlan({ repo }) {
   );
 }
 
+function ArtifactList({ repo }) {
+  const artifacts = repo.artifacts || [];
+  if (!artifacts.length) {
+    return (
+      <div className="rounded-md border border-dashed bg-card p-3">
+        <div className="text-sm font-semibold">No generated files surfaced yet</div>
+        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+          Once an agent writes files inside the active project space, they will appear here with preview paths.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="grid gap-2 text-xs">
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Workspace</span>
+          <strong className="max-w-[62%] truncate text-right">{repo.code_path || "workspaces/default"}</strong>
+        </div>
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Preview</span>
+          <strong className="max-w-[62%] truncate text-right">{repo.preview_command || "python scripts/preview_workspace.py"}</strong>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-1.5">
+        {artifacts.slice(0, 8).map((artifact) => (
+          <div key={artifact.relative_path} className="rounded-md bg-muted/60 px-2 py-1.5">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <strong className="truncate">{artifact.label || artifact.relative_path}</strong>
+              <span className="shrink-0 text-muted-foreground">{artifact.kind}</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+              <span className="truncate">{artifact.relative_path}</span>
+              {artifact.preview_url && (
+                <a
+                  href={artifact.preview_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex shrink-0 items-center gap-1 text-primary"
+                >
+                  <ExternalLink className="h-3 w-3" /> preview
+                </a>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function HarnessDashboard() {
   const refreshing = useRef(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -191,6 +245,7 @@ export default function HarnessDashboard() {
   const policy = props.policy || {};
   const repo = props.repo || {};
   const run = props.run || {};
+  const goalLabel = run.goal_summary || run.goal || "";
   const goalRoles = policy.goal_roles || [];
   const tasks = run.tasks || [];
   const turns = run.turns || [];
@@ -332,10 +387,12 @@ export default function HarnessDashboard() {
           </h3>
           <div className="rounded-md border bg-card p-3">
             <div className="grid gap-2 text-xs">
-              {run.goal && (
+              {goalLabel && (
                 <div className="flex justify-between gap-3">
                   <span className="text-muted-foreground">Goal</span>
-                  <strong className="max-w-[65%] truncate text-right">{run.goal}</strong>
+                  <strong className="max-w-[65%] text-right leading-4" title={run.goal || goalLabel}>
+                    {goalLabel}
+                  </strong>
                 </div>
               )}
               {run.orchestrator_machine && (
@@ -376,6 +433,13 @@ export default function HarnessDashboard() {
           </div>
         </section>
       )}
+
+      <section className="space-y-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <FileCode2 className="h-4 w-4" /> Project Artifacts
+        </h3>
+        <ArtifactList repo={repo} />
+      </section>
 
       <section className="space-y-2">
         <h3 className="flex items-center gap-2 text-sm font-semibold">

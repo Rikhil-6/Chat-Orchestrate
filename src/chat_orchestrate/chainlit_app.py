@@ -17,6 +17,7 @@ import httpx
 from chainlit.input_widget import Select, Switch, TextInput
 
 from chat_orchestrate.a2a import A2A_PROTOCOL_VERSION
+from chat_orchestrate.artifacts import artifact_chat_summary, artifacts_markdown, preview_command, scan_project_artifacts
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
@@ -39,6 +40,7 @@ from chat_orchestrate.models import DelegatedTask, MachineNode, OrchestrationRun
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
+from chat_orchestrate.summaries import summarize_goal
 from chat_orchestrate.swarm_client import build_swarm_client
 from chat_orchestrate.ui_state import (
     append_chat,
@@ -432,11 +434,13 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
         content = "Done. I've updated the dashboard with the current coordination state."
 
     if run and run.delegated_tasks:
+        artifact_summary = artifact_chat_summary(run.project)
         if agent_setup_failure(content):
             return routing_response_with_setup_issue(run, content)
         if worker_result_needs_recovery(content):
             return content
-        return f"{content}\n\nI've kept the machine routing and task details in the dashboard."
+        suffix = f"\n\n{artifact_summary}" if artifact_summary else ""
+        return f"{content}{suffix}\n\nI've kept the machine routing, task details, and artifacts in the dashboard."
     return content
 
 
@@ -610,6 +614,8 @@ async def handle_command(text: str) -> None:
             await cl.Message(content=f"Cloned and selected `{project.name}` at `{project.path}`.").send()
         elif command == "/workspace-modes":
             await show_workspace_modes()
+        elif command == "/artifacts":
+            await show_artifacts()
         elif command == "/machines":
             coordination.heartbeat()
             await show_machines()
@@ -1209,6 +1215,12 @@ async def show_tasks() -> None:
     await cl.Message(content="## Recent Delegated Tasks\n\n" + "\n".join(lines)).send()
 
 
+async def show_artifacts() -> None:
+    project = cl.user_session.get("project_space")
+    await cl.Message(content=artifacts_markdown(project), actions=machine_actions()).send()
+    await show_dashboard_sidebar()
+
+
 async def show_backends() -> None:
     await cl.Message(content=backend_status_cards(), actions=machine_actions()).send()
 
@@ -1513,6 +1525,11 @@ async def show_tasks_action(_: cl.Action) -> None:
     await show_tasks()
 
 
+@cl.action_callback("show_artifacts")
+async def show_artifacts_action(_: cl.Action) -> None:
+    await show_artifacts()
+
+
 @cl.action_callback("show_backends")
 async def show_backends_action(_: cl.Action) -> None:
     await show_backends()
@@ -1612,6 +1629,13 @@ def machine_actions() -> list[cl.Action]:
             label="Recent Tasks",
             tooltip="Show delegated tasks recorded by the orchestrator.",
             icon="list-checks",
+            payload={},
+        ),
+        cl.Action(
+            name="show_artifacts",
+            label="Artifacts",
+            tooltip="Show generated project files and preview commands.",
+            icon="file-code-2",
             payload={},
         ),
         cl.Action(
@@ -1747,6 +1771,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     tasks_snapshot = dashboard_tasks_snapshot()
     current_run_id = current_dashboard_run_id(tasks_snapshot)
     current_tasks = tasks_for_run(tasks_snapshot, current_run_id)
+    artifacts = scan_project_artifacts(project)
     selected_backend = selected_chat_backend()
     selected_ready = backend_is_callable(selected_backend)
     local_capabilities = agent_roles if not selected_ready else infer_machine_capabilities(
@@ -1804,6 +1829,9 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         },
         "repo": {
             "has_goal": bool(last_goal),
+            "code_path": str(project.path) if project else str(settings.workspaces_root / "default"),
+            "preview_command": preview_command(project),
+            "artifacts": [artifact.__dict__ for artifact in artifacts],
             "worker_outputs": repo_worker_outputs(current_tasks),
             "canonical": "waiting for workspace decision",
             "merge": "waiting for worker outputs",
@@ -1874,18 +1902,24 @@ def dashboard_run_props(
     if not run:
         tasks = recent_dashboard_tasks(current_run_id, tasks_snapshot)
         latest = (tasks_snapshot or [None])[0]
+        goal = latest.goal if latest else ""
+        current_tasks = tasks_for_run(tasks_snapshot, current_run_id)
         return {
             "run_id": current_run_id,
-            "goal": latest.goal if latest else "",
+            "goal": goal,
+            "goal_summary": summarize_goal(goal, current_tasks),
             "orchestrator_machine": "",
             "turns": [],
             "tasks": tasks,
         }
     run_id = getattr(run, "run_id", "") or current_run_id
     tasks = recent_dashboard_tasks(run_id, tasks_snapshot)
+    goal = getattr(run, "goal", "")
+    run_tasks = getattr(run, "delegated_tasks", []) or tasks_for_run(tasks_snapshot, run_id)
     return {
         "run_id": run_id,
-        "goal": getattr(run, "goal", ""),
+        "goal": goal,
+        "goal_summary": summarize_goal(goal, run_tasks),
         "orchestrator_machine": getattr(run, "orchestrator_machine", ""),
         "turns": [
             {
@@ -2107,6 +2141,7 @@ def command_help() -> str:
         "- `/worktree <name> <repo-path> <branch>`\n"
         "- `/clone <name> <git-url> [branch]`\n"
         "- `/workspace-modes`\n"
+        "- `/artifacts`\n"
         "- `/machines`\n"
         "- `/claim-orchestrator`\n"
         "- `/release-orchestrator`\n"
