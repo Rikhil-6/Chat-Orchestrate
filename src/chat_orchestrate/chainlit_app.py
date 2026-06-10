@@ -17,7 +17,7 @@ import httpx
 from chainlit.input_widget import Select, Switch, TextInput
 
 from chat_orchestrate.a2a import A2A_PROTOCOL_VERSION
-from chat_orchestrate.artifacts import artifact_chat_summary, artifacts_markdown, preview_command, scan_project_artifacts
+from chat_orchestrate.artifacts import artifacts_markdown, preview_command, scan_project_artifacts, work_proof_summary
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
@@ -418,8 +418,13 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
     if is_lightweight_chat(goal):
         return "Hey, I'm here. Send me what you want the agents to work on, and I'll keep the coordination details in the dashboard."
 
+    project = run.project if run else cl.user_session.get("project_space")
+    proof = work_proof_summary(project, getattr(run, "delegated_tasks", None) if run else None)
+
     if not turns:
-        return "I'm on it. I've updated the dashboard with the current coordination state."
+        if proof:
+            return f"I found the project workspace and generated artifacts.\n\n{proof}"
+        return "I'm on it. I could not find generated workspace artifacts yet, so no code proof is available."
 
     preferred_roles = ["engineer", "backend", "frontend", "coordinator", "researcher", "reviewer", "documenter"]
     chosen = turns[-1]
@@ -431,16 +436,17 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
 
     content = brief_agent_chat_content(chosen.content)
     if not content:
-        content = "Done. I've updated the dashboard with the current coordination state."
+        content = "Done."
 
     if run and run.delegated_tasks:
-        artifact_summary = artifact_chat_summary(run.project)
         if agent_setup_failure(content):
             return routing_response_with_setup_issue(run, content)
         if worker_result_needs_recovery(content):
             return content
-        suffix = f"\n\n{artifact_summary}" if artifact_summary else ""
-        return f"{content}{suffix}\n\nI've kept the machine routing, task details, and artifacts in the dashboard."
+        suffix = f"\n\n{proof}" if proof else "\n\nNo generated files were found in the active workspace yet."
+        return f"{content}{suffix}"
+    if proof:
+        return f"{content}\n\n{proof}"
     return content
 
 

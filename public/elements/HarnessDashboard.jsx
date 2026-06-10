@@ -305,6 +305,13 @@ export default function HarnessDashboard() {
       </section>
 
       <section className="space-y-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <FileCode2 className="h-4 w-4" /> Project Artifacts
+        </h3>
+        <ArtifactList repo={repo} />
+      </section>
+
+      <section className="space-y-2">
         <div className="flex items-center justify-between">
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <Users className="h-4 w-4" /> Machines
@@ -433,13 +440,6 @@ export default function HarnessDashboard() {
           </div>
         </section>
       )}
-
-      <section className="space-y-2">
-        <h3 className="flex items-center gap-2 text-sm font-semibold">
-          <FileCode2 className="h-4 w-4" /> Project Artifacts
-        </h3>
-        <ArtifactList repo={repo} />
-      </section>
 
       <section className="space-y-2">
         <h3 className="flex items-center gap-2 text-sm font-semibold">

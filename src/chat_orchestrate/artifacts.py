@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Iterable
 
 from .models import ProjectSpace
 
@@ -88,14 +89,50 @@ def artifact_chat_summary(project: ProjectSpace | None, limit: int = 5) -> str:
         return ""
 
     lines = [
-        f"Code lives at `{project.path}`.",
-        "Most useful artifacts:",
+        "### Work Proof",
+        f"Workspace: `{project.path}`",
+        "",
+        "Code artifacts:",
     ]
     for artifact in artifacts[:limit]:
-        lines.append(f"- `{artifact.relative_path}` ({artifact.kind})")
+        lines.append(f"- `{artifact.relative_path}` ({artifact.kind}, updated {artifact.updated_at})")
     if any(artifact.relative_path == "frontend/index.html" for artifact in artifacts):
-        lines.append(f"Interactive preview: `{preview_command(project)}` then open `http://localhost:5173`.")
+        lines.extend(
+            [
+                "",
+                f"Preview: run `{preview_command(project)}` then open `http://localhost:5173`.",
+            ]
+        )
     return "\n".join(lines)
+
+
+def agent_work_summary(tasks: Iterable[object] | None = None, limit: int = 5) -> str:
+    if not tasks:
+        return ""
+    lines = []
+    for task in list(tasks)[:limit]:
+        if isinstance(task, dict):
+            role = task.get("role", "")
+            machine = task.get("machine", "") or task.get("assigned_machine", "")
+            backend = task.get("backend", "") or task.get("preferred_backend", "")
+            status = task.get("status", "")
+        else:
+            role = getattr(task, "role", "")
+            machine = getattr(task, "assigned_machine", "") or getattr(task, "machine", "")
+            backend = getattr(task, "preferred_backend", "") or getattr(task, "backend", "")
+            status = getattr(task, "status", "")
+        clean = " ".join(part for part in [str(role), "on", str(machine), f"via {backend}" if backend else "", f"({status})" if status else ""] if part)
+        if clean:
+            lines.append(f"- {clean}")
+    if not lines:
+        return ""
+    return "Agent evidence:\n" + "\n".join(lines)
+
+
+def work_proof_summary(project: ProjectSpace | None, tasks: Iterable[object] | None = None) -> str:
+    artifacts = artifact_chat_summary(project)
+    evidence = agent_work_summary(tasks)
+    return "\n\n".join(part for part in [artifacts, evidence] if part)
 
 
 def artifacts_markdown(project: ProjectSpace | None) -> str:

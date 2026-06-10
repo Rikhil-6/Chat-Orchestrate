@@ -1,7 +1,9 @@
 from pathlib import Path
 
-from chat_orchestrate.artifacts import artifact_chat_summary, preview_command, scan_project_artifacts
-from chat_orchestrate.models import ProjectSpace
+from datetime import UTC, datetime
+
+from chat_orchestrate.artifacts import artifact_chat_summary, preview_command, scan_project_artifacts, work_proof_summary
+from chat_orchestrate.models import DelegatedTask, ProjectSpace
 
 
 def test_scan_project_artifacts_prioritizes_generated_app_files(tmp_path: Path) -> None:
@@ -40,3 +42,28 @@ def test_artifact_chat_summary_points_to_workspace_and_preview(tmp_path: Path) -
     assert str(workspace) in summary
     assert "frontend/index.html" in summary
     assert preview_command(project) in summary
+
+
+def test_work_proof_summary_includes_files_and_agent_evidence(tmp_path: Path) -> None:
+    workspace = tmp_path / "demo"
+    (workspace / "frontend").mkdir(parents=True)
+    (workspace / "frontend" / "index.html").write_text("<html></html>", encoding="utf-8")
+    project = ProjectSpace("demo", workspace)
+    task = DelegatedTask(
+        "task-1",
+        "run-1",
+        "demo",
+        "build site",
+        "frontend",
+        "Frontend pass",
+        "machine-a",
+        "codex",
+        "completed",
+        datetime.now(UTC),
+    )
+
+    proof = work_proof_summary(project, [task])
+
+    assert "Work Proof" in proof
+    assert "frontend/index.html" in proof
+    assert "frontend on machine-a via codex (completed)" in proof
