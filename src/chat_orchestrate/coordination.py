@@ -16,6 +16,15 @@ from .capabilities import infer_goal_roles
 from .models import DelegatedTask, MachineNode, ProjectSpace
 
 
+def unique_non_empty(values: list[str]) -> list[str]:
+    result = []
+    for value in values:
+        clean = str(value or "").strip()
+        if clean and clean not in result:
+            result.append(clean)
+    return result
+
+
 class CoordinationError(RuntimeError):
     pass
 
@@ -228,16 +237,107 @@ class CoordinationManager:
 
     def _hinted_machine_for_role(self, machines: list[MachineNode], role: str, goal: str) -> MachineNode | None:
         lowered = goal.lower()
-        if role in {"backend", "engineer"} and "this machine" in lowered:
+        local_reference = self._local_reference_index_for_role(role, lowered)
+        if local_reference >= 0:
             for machine in machines:
                 if machine.machine_id == self.machine_id:
                     return machine
-        if role == "frontend":
-            for machine in machines:
-                identifiers = [machine.machine_id.lower(), machine.hostname.lower()]
-                if machine.machine_id != self.machine_id and any(identifier in lowered for identifier in identifiers):
-                    return machine
+
+        for machine in machines:
+            mention_index = self._machine_mention_index(machine, lowered)
+            if mention_index >= 0 and self._role_points_to_reference(role, lowered, mention_index):
+                return machine
         return None
+
+    def _machine_mention_index(self, machine: MachineNode, lowered_goal: str) -> int:
+        normalized_goal = self._normalize_machine_id(lowered_goal)
+        identifiers = unique_non_empty(
+            [
+                machine.machine_id.lower(),
+                machine.hostname.lower(),
+                self._normalize_machine_id(machine.machine_id),
+                self._normalize_machine_id(machine.hostname),
+            ]
+        )
+        for identifier in identifiers:
+            if len(identifier) < 4:
+                continue
+            index = lowered_goal.find(identifier)
+            if index >= 0:
+                return index
+        for identifier in identifiers:
+            normalized = self._normalize_machine_id(identifier)
+            if len(normalized) < 6:
+                continue
+            for size in (12, 10, 8, 6):
+                prefix = normalized[:size]
+                if len(prefix) >= 6 and prefix in normalized_goal:
+                    return max(0, lowered_goal.find(prefix[:4]))
+        return -1
+
+    def _local_reference_index_for_role(self, role: str, lowered_goal: str) -> int:
+        phrases = [
+            "this machine",
+            "this computer",
+            "this pc",
+            "current machine",
+            "current computer",
+            "local machine",
+            "local computer",
+            "on here",
+            "run here",
+            "handled here",
+        ]
+        for phrase in phrases:
+            index = lowered_goal.find(phrase)
+            if index >= 0 and self._role_points_to_reference(role, lowered_goal, index):
+                return index
+        return -1
+
+    def _role_points_to_reference(self, role: str, lowered_goal: str, index: int) -> bool:
+        before = lowered_goal[max(0, index - 140) : index]
+        latest_role = self._latest_role_in_text(before)
+        if latest_role:
+            return latest_role == role
+
+        after = lowered_goal[index : index + 90]
+        earliest_role = self._earliest_role_in_text(after)
+        return earliest_role == role
+
+    def _latest_role_in_text(self, text: str) -> str:
+        latest_role = ""
+        latest_index = -1
+        for role in self._known_roles():
+            role_index = max(text.rfind(term) for term in self._role_terms(role))
+            if role_index > latest_index:
+                latest_role = role
+                latest_index = role_index
+        return latest_role
+
+    def _earliest_role_in_text(self, text: str) -> str:
+        earliest_role = ""
+        earliest_index = len(text) + 1
+        for role in self._known_roles():
+            indexes = [text.find(term) for term in self._role_terms(role)]
+            role_indexes = [index for index in indexes if index >= 0]
+            if role_indexes and min(role_indexes) < earliest_index:
+                earliest_role = role
+                earliest_index = min(role_indexes)
+        return earliest_role
+
+    def _known_roles(self) -> list[str]:
+        return ["coordinator", "researcher", "engineer", "backend", "frontend", "reviewer", "documenter"]
+
+    def _role_terms(self, role: str) -> list[str]:
+        return {
+            "backend": ["backend", "back end", "api", "server", "database", "db"],
+            "frontend": ["frontend", "front end", "ui", "ux", "page", "client"],
+            "engineer": ["engineer", "implementation"],
+            "researcher": ["research", "scout", "inspect", "context"],
+            "reviewer": ["review", "test", "quality", "qa"],
+            "documenter": ["docs", "document", "readme", "notes"],
+            "coordinator": ["coordinate", "orchestrate", "plan", "lead"],
+        }.get(role, [role])
 
     def _preferred_backend_for_role(self, machine: MachineNode, role: str, goal: str) -> str:
         lowered = goal.lower()

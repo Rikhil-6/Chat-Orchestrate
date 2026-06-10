@@ -1739,6 +1739,8 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     project = cl.user_session.get("project_space")
     last_goal = str(cl.user_session.get("last_goal") or "")
     tasks_snapshot = dashboard_tasks_snapshot()
+    current_run_id = current_dashboard_run_id(tasks_snapshot)
+    current_tasks = tasks_for_run(tasks_snapshot, current_run_id)
     selected_backend = selected_chat_backend()
     selected_ready = backend_is_callable(selected_backend)
     local_capabilities = agent_roles if not selected_ready else infer_machine_capabilities(
@@ -1773,6 +1775,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "host_port": host_port,
             "coordinator_url": coordination.http_url or settings.coordination_http_url,
             "host_urls": coordinator_urls,
+            "last_refreshed": datetime.now(UTC).strftime("%H:%M:%S"),
             "token_set": bool(settings.coordination_token),
             "a2a_enabled": hosting_live or connected_to_http,
             "a2a_version": A2A_PROTOCOL_VERSION,
@@ -1795,24 +1798,53 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         },
         "repo": {
             "has_goal": bool(last_goal),
-            "worker_outputs": repo_worker_outputs(tasks_snapshot),
+            "worker_outputs": repo_worker_outputs(current_tasks),
             "canonical": "waiting for workspace decision",
             "merge": "waiting for worker outputs",
         },
-        "run": dashboard_run_props(tasks_snapshot),
-        "machines": [machine_dashboard_props(machine, tasks_snapshot) for machine in machines],
+        "run": dashboard_run_props(tasks_snapshot, current_run_id),
+        "machines": [machine_dashboard_props(machine, tasks_snapshot, current_run_id) for machine in machines],
     }
 
 
-def machine_dashboard_props(machine: MachineNode, tasks: list[DelegatedTask] | None = None) -> dict:
+def current_dashboard_run_id(tasks_snapshot: list[DelegatedTask] | None = None) -> str:
+    run = cl.user_session.get("last_run")
+    if run and getattr(run, "run_id", ""):
+        return str(getattr(run, "run_id", ""))
+    for task in tasks_snapshot or []:
+        if task.run_id:
+            return task.run_id
+    return ""
+
+
+def tasks_for_run(tasks: list[DelegatedTask] | None, run_id: str) -> list[DelegatedTask]:
+    if not tasks:
+        return []
+    if not run_id:
+        return list(tasks)
+    return [task for task in tasks if task.run_id == run_id]
+
+
+def machine_dashboard_props(
+    machine: MachineNode,
+    tasks: list[DelegatedTask] | None = None,
+    run_id: str = "",
+) -> dict:
     age = datetime.now(UTC) - machine.last_seen
+    machine_tasks = [
+        task
+        for task in tasks_for_run(tasks or [], run_id)
+        if task.assigned_machine == machine.machine_id
+    ][:4]
     assignments = [
         task_dashboard_props(task)
-        for task in (tasks or [])
-        if task.assigned_machine == machine.machine_id and task.status in {"delegated", "running"}
-    ][:4]
-    active_roles = unique_preserving_order([task["role"] for task in assignments])
-    visible_capabilities = unique_preserving_order([*active_roles, *machine.capabilities])
+        for task in reversed(machine_tasks)
+    ]
+    assigned_roles = unique_preserving_order([task["role"] for task in assignments])
+    active_roles = unique_preserving_order(
+        [task["role"] for task in assignments if task["status"] in {"delegated", "running"}]
+    )
+    visible_capabilities = unique_preserving_order([*assigned_roles, *machine.capabilities])
     return {
         "machine_id": machine.machine_id,
         "hostname": machine.hostname,
@@ -1823,25 +1855,30 @@ def machine_dashboard_props(machine: MachineNode, tasks: list[DelegatedTask] | N
         "capabilities": visible_capabilities,
         "agent_backends": machine.agent_backends,
         "active_roles": active_roles,
+        "assigned_roles": assigned_roles,
         "assignments": assignments,
     }
 
 
-def dashboard_run_props(tasks_snapshot: list[DelegatedTask] | None = None) -> dict:
+def dashboard_run_props(
+    tasks_snapshot: list[DelegatedTask] | None = None,
+    current_run_id: str = "",
+) -> dict:
     run = cl.user_session.get("last_run")
     if not run:
-        tasks = recent_dashboard_tasks("", tasks_snapshot)
+        tasks = recent_dashboard_tasks(current_run_id, tasks_snapshot)
         latest = (tasks_snapshot or [None])[0]
         return {
-            "run_id": "",
+            "run_id": current_run_id,
             "goal": latest.goal if latest else "",
             "orchestrator_machine": "",
             "turns": [],
             "tasks": tasks,
         }
-    tasks = recent_dashboard_tasks(getattr(run, "run_id", ""), tasks_snapshot)
+    run_id = getattr(run, "run_id", "") or current_run_id
+    tasks = recent_dashboard_tasks(run_id, tasks_snapshot)
     return {
-        "run_id": getattr(run, "run_id", ""),
+        "run_id": run_id,
         "goal": getattr(run, "goal", ""),
         "orchestrator_machine": getattr(run, "orchestrator_machine", ""),
         "turns": [

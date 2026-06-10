@@ -293,6 +293,7 @@ class Orchestrator:
             {
                 "machine_id": machine.machine_id,
                 "hostname": machine.hostname,
+                "aliases": self._machine_aliases(machine),
                 "role": machine.role,
                 "status": machine.status,
                 "capabilities": machine.capabilities,
@@ -309,9 +310,12 @@ class Orchestrator:
             "- Infer the roles needed from the user's intent; use only these allowed role names: "
             "coordinator, researcher, engineer, backend, frontend, reviewer, documenter.\n"
             "- Always include coordinator plus any concrete work roles needed.\n"
-            "- Use only exact machine_id values from the roster.\n"
-            "- If the user says this/current/local machine, map that to the roster item with is_this_machine=true.\n"
-            "- If the user names another machine, map the mentioned responsibility to that exact machine_id.\n"
+            "- Do named-entity and coreference resolution over the whole goal: resolve hostnames, shortened "
+            "machine names, nearby role phrases, and references like my laptop, local machine, this one, "
+            "the other PC, host, worker, or coordinator.\n"
+            "- Prefer exact machine_id values from the roster, but use aliases to resolve shortened names.\n"
+            "- If the user refers to this/current/local/here, map that to the roster item with is_this_machine=true.\n"
+            "- If the user names another machine or alias, map the mentioned responsibility to that live machine.\n"
             "- If a role is not clearly assigned by the user, choose the best live machine by capability/backend.\n"
             "- Never invent a machine_id.\n\n"
             f"Project: {project.name}\n"
@@ -323,9 +327,14 @@ class Orchestrator:
             output = await self.client.run_agent(ROUTING_PLANNER, project, goal, prompt)
         except Exception:
             return {}, roles
-        return self._parse_machine_plan(output, {machine.machine_id for machine in machines}, roles)
+        return self._parse_machine_plan(output, machines, roles)
 
-    def _parse_machine_plan(self, output: str, machine_ids: set[str], fallback_roles: list[str]) -> tuple[dict[str, str], list[str]]:
+    def _parse_machine_plan(
+        self,
+        output: str,
+        machines: list[MachineNode],
+        fallback_roles: list[str],
+    ) -> tuple[dict[str, str], list[str]]:
         payload = self._extract_json_object(output)
         if not payload:
             return {}, list(fallback_roles)
@@ -339,19 +348,81 @@ class Orchestrator:
         ]
         if not isinstance(assignments, list):
             return preferences, self._unique_roles([*planned_roles, *fallback_roles])
-        normalized_machines = {self._normalize_machine_id(machine_id): machine_id for machine_id in machine_ids}
         for item in assignments:
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role", "")).strip().lower()
-            machine_id = str(item.get("machine_id", "")).strip()
+            machine_id = str(
+                item.get("machine_id")
+                or item.get("machine")
+                or item.get("machine_ref")
+                or item.get("target")
+                or item.get("host")
+                or ""
+            ).strip()
             if role not in allowed_roles:
                 continue
-            exact_machine = machine_id if machine_id in machine_ids else normalized_machines.get(self._normalize_machine_id(machine_id), "")
+            if not machine_id and item.get("is_this_machine") and self.coordination is not None:
+                machine_id = self.coordination.machine_id
+            exact_machine = self._resolve_machine_reference(machine_id, machines)
+            if not exact_machine and item.get("is_this_machine") and self.coordination is not None:
+                exact_machine = self.coordination.machine_id
             if exact_machine:
                 preferences[role] = exact_machine
                 planned_roles.append(role)
         return preferences, self._unique_roles(["coordinator", *planned_roles, *fallback_roles])
+
+    def _resolve_machine_reference(self, reference: str, machines: list[MachineNode]) -> str:
+        clean = str(reference or "").strip()
+        if not clean:
+            return ""
+        for machine in machines:
+            if clean == machine.machine_id:
+                return machine.machine_id
+
+        normalized = self._normalize_machine_id(clean)
+        if not normalized:
+            return ""
+        local_references = {
+            "this",
+            "thismachine",
+            "thiscomputer",
+            "thispc",
+            "currentmachine",
+            "currentcomputer",
+            "local",
+            "localmachine",
+            "localcomputer",
+            "here",
+        }
+        if normalized in local_references:
+            return self.coordination.machine_id if self.coordination is not None else ""
+        alias_matches: dict[str, set[str]] = {}
+        for machine in machines:
+            for alias in self._machine_aliases(machine):
+                alias_matches.setdefault(self._normalize_machine_id(alias), set()).add(machine.machine_id)
+
+        exact = alias_matches.get(normalized, set())
+        if len(exact) == 1:
+            return next(iter(exact))
+
+        if len(normalized) < 5:
+            return ""
+        fuzzy: set[str] = set()
+        for alias, machine_ids in alias_matches.items():
+            if alias.startswith(normalized) or normalized.startswith(alias) or normalized in alias:
+                fuzzy.update(machine_ids)
+        return next(iter(fuzzy)) if len(fuzzy) == 1 else ""
+
+    def _machine_aliases(self, machine: MachineNode) -> list[str]:
+        aliases = [machine.machine_id, machine.hostname]
+        for value in [machine.machine_id, machine.hostname]:
+            normalized = self._normalize_machine_id(value)
+            aliases.append(normalized)
+            for size in (6, 8, 10, 12):
+                if len(normalized) >= size:
+                    aliases.append(normalized[:size])
+        return self._unique_roles(aliases)
 
     def _unique_roles(self, roles: list[str]) -> list[str]:
         result = []

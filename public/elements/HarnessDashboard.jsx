@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -59,7 +59,7 @@ function MachineCard({ machine, orchestratorId }) {
         </div>
         {assignments.length > 0 && (
           <div className="space-y-1.5 rounded-md border border-primary/30 bg-primary/5 p-2">
-            <div className="text-[11px] font-semibold text-primary">Active assignment</div>
+            <div className="text-[11px] font-semibold text-primary">Latest assignment</div>
             {assignments.map((task) => (
               <div key={task.task_id || `${task.role}-${task.status}`} className="grid gap-1">
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -183,6 +183,7 @@ function EmptyPlan({ repo }) {
 
 export default function HarnessDashboard() {
   const refreshing = useRef(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const machines = props.machines || [];
   const overview = props.overview || {};
   const workspace = props.workspace || {};
@@ -193,15 +194,21 @@ export default function HarnessDashboard() {
   const tasks = run.tasks || [];
   const turns = run.turns || [];
 
+  const refreshDashboard = async () => {
+    if (refreshing.current) return;
+    refreshing.current = true;
+    setIsRefreshing(true);
+    try {
+      await action("refresh_dashboard");
+    } finally {
+      refreshing.current = false;
+      setIsRefreshing(false);
+    }
+  };
+
   useEffect(() => {
-    const refresh = async () => {
-      if (refreshing.current) return;
-      refreshing.current = true;
-      try {
-        await action("refresh_dashboard");
-      } finally {
-        refreshing.current = false;
-      }
+    const refresh = () => {
+      refreshDashboard();
     };
     const interval = window.setInterval(refresh, 5000);
     return () => window.clearInterval(interval);
@@ -217,7 +224,12 @@ export default function HarnessDashboard() {
               Live machine roster, execution policy, and repo convergence while chat remains active.
             </p>
           </div>
-          <Badge variant="outline">{overview.cluster_id || "local"}</Badge>
+          <div className="flex flex-col items-end gap-1">
+            <Badge variant="outline">{overview.cluster_id || "local"}</Badge>
+            {overview.last_refreshed && (
+              <span className="text-[10px] text-muted-foreground">synced {overview.last_refreshed}</span>
+            )}
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-2">
           <Stat label="Coordinator" value={overview.orchestrator_id || "unknown"} />
@@ -233,8 +245,9 @@ export default function HarnessDashboard() {
           <h3 className="flex items-center gap-2 text-sm font-semibold">
             <Users className="h-4 w-4" /> Machines
           </h3>
-          <Button size="sm" variant="outline" onClick={() => action("refresh_dashboard")}>
-            <RefreshCw className="mr-2 h-3.5 w-3.5" /> Refresh
+          <Button size="sm" variant="outline" disabled={isRefreshing} onClick={refreshDashboard}>
+            <RefreshCw className={`mr-2 h-3.5 w-3.5 ${isRefreshing ? "animate-spin" : ""}`} />
+            {isRefreshing ? "Refreshing" : "Refresh"}
           </Button>
         </div>
         <div className="grid gap-2">
