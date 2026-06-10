@@ -165,7 +165,12 @@ def test_task_command_args_give_codex_workspace_write_access(tmp_path: Path) -> 
     ]
 
 
-def test_task_command_args_give_claude_workspace_access(tmp_path: Path) -> None:
+def test_task_command_args_give_claude_workspace_access(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "chat_orchestrate.backends.command_help_text",
+        lambda command: "--add-dir <path> --permission-mode <mode>",
+    )
+
     args = task_command_args(CLAUDE_CODE_BACKEND, "claude", "do work", tmp_path)
 
     assert args == [
@@ -177,6 +182,14 @@ def test_task_command_args_give_claude_workspace_access(tmp_path: Path) -> None:
         "-p",
         "do work",
     ]
+
+
+def test_task_command_args_omit_unsupported_claude_options(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("chat_orchestrate.backends.command_help_text", lambda command: "")
+
+    args = task_command_args(CLAUDE_CODE_BACKEND, "claude", "do work", tmp_path)
+
+    assert args == ["claude", "-p", "do work"]
 
 
 def test_task_command_args_give_gemini_supported_workspace_options(tmp_path: Path, monkeypatch) -> None:

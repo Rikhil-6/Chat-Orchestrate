@@ -123,8 +123,10 @@ def task_command_args(backend: str, command: str, prompt: str, workspace_path: P
 
     if backend == CLAUDE_CODE_BACKEND:
         args = [command]
-        if workspace_path:
-            args.extend(["--add-dir", str(workspace_path), "--permission-mode", "acceptEdits"])
+        if workspace_path and command_supports_option(command, "--add-dir"):
+            args.extend(["--add-dir", str(workspace_path)])
+        if command_supports_option(command, "--permission-mode"):
+            args.extend(["--permission-mode", "acceptEdits"])
         args.extend(["-p", prompt])
         return args
 

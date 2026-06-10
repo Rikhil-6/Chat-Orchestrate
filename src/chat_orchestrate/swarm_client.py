@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import threading
 from collections.abc import AsyncIterator
@@ -118,11 +119,21 @@ class LocalAgentCliClient(SwarmClient):
         preferred_backend: str = "auto",
         command_overrides: dict[str, str] | None = None,
         openai_api_key: str = "",
+        api_keys: dict[str, str] | None = None,
     ) -> None:
         self.settings = settings
         self.preferred_backend = "auto" if preferred_backend in {"Select", ""} else preferred_backend
         self.command_overrides = command_overrides or settings.command_overrides
-        self.openai_api_key = openai_api_key.strip() or settings.openai_api_key.strip()
+        self.api_keys = {
+            backend: str(value or "").strip()
+            for backend, value in (api_keys or {}).items()
+            if str(value or "").strip()
+        }
+        self.openai_api_key = (
+            openai_api_key.strip()
+            or self.api_keys.get(CODEX_BACKEND, "")
+            or settings.openai_api_key.strip()
+        )
         self.backends = [
             backend
             for backend in detect_agent_backends(settings.configured_backends, self.command_overrides)
@@ -239,6 +250,7 @@ class LocalAgentCliClient(SwarmClient):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=workspace_path,
+                env=self._backend_env(backend),
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -260,17 +272,35 @@ class LocalAgentCliClient(SwarmClient):
         loop = asyncio.get_running_loop()
 
         def put_thread_event(label: str, line: str = "") -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, (label, line))
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (label, line))
+            except RuntimeError:
+                pass
 
         def pump_stream(stream, label: str) -> None:
             if stream is None:
                 put_thread_event(f"{label}-done")
                 return
+            buffer: list[str] = []
+
+            def flush_buffer() -> None:
+                if not buffer:
+                    return
+                put_thread_event(label, "".join(buffer).strip())
+                buffer.clear()
+
             try:
-                for raw in iter(stream.readline, ""):
-                    clean = raw.strip()
-                    if clean:
-                        put_thread_event(label, clean)
+                while True:
+                    char = stream.read(1)
+                    if char == "":
+                        break
+                    if char in {"\n", "\r"}:
+                        flush_buffer()
+                        continue
+                    buffer.append(char)
+                    if len(buffer) >= 160:
+                        flush_buffer()
+                flush_buffer()
             finally:
                 put_thread_event(f"{label}-done")
 
@@ -389,15 +419,30 @@ class LocalAgentCliClient(SwarmClient):
             return clean
         return f"{clean[: limit - 1]}..."
 
+    def _backend_env(self, backend: str) -> dict[str, str]:
+        env = os.environ.copy()
+        if self.openai_api_key:
+            env["OPENAI_API_KEY"] = self.openai_api_key
+        claude_key = self.api_keys.get(CLAUDE_CODE_BACKEND, "")
+        if claude_key:
+            env["ANTHROPIC_API_KEY"] = claude_key
+            env["CLAUDE_API_KEY"] = claude_key
+        gemini_key = self.api_keys.get(GEMINI_CLI_BACKEND, "")
+        if gemini_key:
+            env["GEMINI_API_KEY"] = gemini_key
+            env["GOOGLE_API_KEY"] = gemini_key
+        return env
+
 
 def build_swarm_client(
     settings: Settings,
     preferred_backend: str = "auto",
     command_overrides: dict[str, str] | None = None,
     openai_api_key: str = "",
+    api_keys: dict[str, str] | None = None,
 ) -> SwarmClient:
     if settings.use_open_swarm:
         return OpenSwarmClient(settings)
     if settings.use_local_agent_chat:
-        return LocalAgentCliClient(settings, preferred_backend, command_overrides, openai_api_key)
+        return LocalAgentCliClient(settings, preferred_backend, command_overrides, openai_api_key, api_keys)
     return LocalPreviewSwarmClient()

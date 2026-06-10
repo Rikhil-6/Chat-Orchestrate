@@ -214,7 +214,13 @@ async def run_claimed_ui_task_live(task, status_message: cl.Message | None) -> s
         "Work concretely in the project space when possible. Surface blockers, sandbox/tool errors, "
         "files changed, commands run, and preview or verification details."
     )
-    client = build_swarm_client(settings, task.preferred_backend, load_command_overrides(), load_openai_api_key())
+    client = build_swarm_client(
+        settings,
+        task.preferred_backend,
+        load_command_overrides(),
+        load_openai_api_key(),
+        load_agent_api_keys(),
+    )
     started = asyncio.get_running_loop().time()
     tick = 0
     result = ""
@@ -388,6 +394,7 @@ async def on_message(message: cl.Message) -> None:
             selected_backend,
             load_command_overrides(),
             load_openai_api_key(),
+            load_agent_api_keys(),
         ),
         turn_agent_names,
         coordination,
@@ -1227,6 +1234,34 @@ def load_openai_api_key() -> str:
     credentials = load_credentials()
     codex_credentials = credentials.get(CODEX_BACKEND, {})
     return clean_secret_input(session_key) or clean_secret_input(codex_credentials.get("openai_api_key", "")) or settings.openai_api_key.strip()
+
+
+def load_agent_api_keys() -> dict[str, str]:
+    credentials = load_credentials()
+    try:
+        openai_key = cl.user_session.get("openai_api_key")
+        claude_key = cl.user_session.get("claude_api_key")
+        gemini_key = cl.user_session.get("gemini_api_key")
+    except Exception:
+        openai_key = ""
+        claude_key = ""
+        gemini_key = ""
+    codex_credentials = credentials.get(CODEX_BACKEND, {})
+    claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
+    gemini_credentials = credentials.get(GEMINI_CLI_BACKEND, {})
+    return {
+        CODEX_BACKEND: clean_secret_input(openai_key)
+        or clean_secret_input(codex_credentials.get("openai_api_key", ""))
+        or settings.openai_api_key.strip(),
+        CLAUDE_CODE_BACKEND: clean_secret_input(claude_key)
+        or clean_secret_input(claude_credentials.get("claude_api_key", ""))
+        or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        or os.environ.get("CLAUDE_API_KEY", "").strip(),
+        GEMINI_CLI_BACKEND: clean_secret_input(gemini_key)
+        or clean_secret_input(gemini_credentials.get("gemini_api_key", ""))
+        or os.environ.get("GEMINI_API_KEY", "").strip()
+        or os.environ.get("GOOGLE_API_KEY", "").strip(),
+    }
 
 
 def validated_command_preference(backend: str, command: str) -> str:
