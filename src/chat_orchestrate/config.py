@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     claude_command: str = ""
     gemini_command: str = ""
     delegated_task_wait_seconds: float = 90.0
+    delegated_task_ack_seconds: float = 6.0
     default_agent_set: str = "coordinator,researcher,engineer,reviewer,documenter"
 
     @property

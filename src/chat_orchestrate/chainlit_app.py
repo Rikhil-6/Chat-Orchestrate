@@ -34,7 +34,7 @@ from chat_orchestrate.backends import (
 from chat_orchestrate.capabilities import infer_goal_roles, infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
-from chat_orchestrate.models import MachineNode, OrchestrationRun, ProgressUpdate
+from chat_orchestrate.models import DelegatedTask, MachineNode, OrchestrationRun, ProgressUpdate
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
@@ -120,26 +120,113 @@ async def ui_worker_loop() -> None:
             await asyncio.sleep(settings.worker_poll_seconds)
             continue
 
-        try:
-            result = await asyncio.to_thread(
-                run_task,
+        await run_claimed_ui_task(task)
+
+
+async def run_claimed_ui_task(task) -> None:
+    status_message = cl.Message(content=worker_task_status_content(task, "assigned"))
+    try:
+        await status_message.send()
+    except Exception:
+        status_message = None
+    await show_dashboard_sidebar()
+
+    work = asyncio.create_task(
+        asyncio.to_thread(
+            run_task,
+            task,
+            not settings.use_local_agent_chat,
+            load_command_overrides(),
+            load_openai_api_key(),
+            settings.codex_api_model,
+            settings.workspaces_root,
+        )
+    )
+    started = asyncio.get_running_loop().time()
+    tick = 0
+    while not work.done():
+        await asyncio.sleep(max(2.0, min(5.0, settings.worker_poll_seconds)))
+        if work.done():
+            break
+        tick += 1
+        if status_message is not None:
+            status_message.content = worker_task_status_content(
                 task,
-                not settings.use_local_agent_chat,
-                load_command_overrides(),
-                load_openai_api_key(),
-                settings.codex_api_model,
-                settings.workspaces_root,
+                "running",
+                int(asyncio.get_running_loop().time() - started),
+                tick,
             )
-        except Exception as exc:  # pragma: no cover - defensive UI worker boundary
             try:
-                coordination.complete_task(task.task_id, str(exc), status="failed")
-            except CoordinationError:
-                pass
-        else:
+                await status_message.update()
+            except Exception:
+                status_message = None
+        await show_dashboard_sidebar()
+
+    try:
+        result = await work
+    except Exception as exc:  # pragma: no cover - defensive UI worker boundary
+        try:
+            coordination.complete_task(task.task_id, str(exc), status="failed")
+        except CoordinationError:
+            pass
+        if status_message is not None:
+            status_message.content = worker_task_status_content(task, "failed", result=str(exc))
             try:
-                coordination.complete_task(task.task_id, result)
-            except CoordinationError:
+                await status_message.update()
+            except Exception:
                 pass
+    else:
+        try:
+            coordination.complete_task(task.task_id, result)
+        except CoordinationError:
+            pass
+        if status_message is not None:
+            status_message.content = worker_task_status_content(task, "completed", result=result)
+            try:
+                await status_message.update()
+            except Exception:
+                pass
+    await show_dashboard_sidebar()
+
+
+def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0, result: str = "") -> str:
+    heading = {
+        "assigned": "Assigned To This Machine",
+        "running": "Local Agent Working",
+        "completed": "Task Completed",
+        "failed": "Task Failed",
+    }.get(phase, "Worker Task")
+    lines = [
+        f"## {heading}",
+        "",
+        f"Role: `{task.role}`",
+        f"Backend: `{task.preferred_backend}`",
+        f"Project: `{task.project}`",
+        f"Task: {task.title}",
+    ]
+    if phase == "assigned":
+        lines.append("")
+        lines.append("I picked this up from the coordinator and am starting the local agent now.")
+    elif phase == "running":
+        activities = [
+            "opening the project workspace",
+            "running the selected local agent",
+            "preparing the handoff result for the coordinator",
+        ]
+        lines.append("")
+        lines.append(f"Status: {activities[(tick - 1) % len(activities)]}. Elapsed `{elapsed}s`.")
+    elif phase == "completed":
+        lines.append("")
+        lines.append("Returned the result to the coordinator.")
+        summary = first_content_line(result)
+        if summary and summary != "No output captured.":
+            lines.append(f"Result: {summary}")
+    elif phase == "failed":
+        lines.append("")
+        lines.append("The coordinator has been told this task failed.")
+        if result:
+            lines.append(f"Error: {result[:240]}")
+    return "\n".join(lines)
 
 
 @cl.on_chat_start
@@ -238,7 +325,8 @@ async def on_message(message: cl.Message) -> None:
         ),
         turn_agent_names,
         coordination,
-        settings.delegated_task_wait_seconds,
+        delegated_task_wait_seconds=settings.delegated_task_wait_seconds,
+        delegated_task_ack_seconds=settings.delegated_task_ack_seconds,
     )
     turns = []
     final_run = None
@@ -247,6 +335,8 @@ async def on_message(message: cl.Message) -> None:
             progress_items[progress_key(event)] = progress_line(event)
             progress_message.content = render_progress(progress_items)
             await progress_message.update()
+            if event.phase in {"delegation", "assigned", "coordinator-ready", "handoff", "remote-work", "artifact-check"}:
+                await show_dashboard_sidebar()
             continue
         if isinstance(event, OrchestrationRun):
             final_run = event
@@ -256,6 +346,7 @@ async def on_message(message: cl.Message) -> None:
         progress_items[f"done:{event.agent}:{event.role}"] = f"- `done` {event.agent} finished its `{event.role}` pass."
         progress_message.content = render_progress(progress_items)
         await progress_message.update()
+        await show_dashboard_sidebar()
 
     if final_run:
         cl.user_session.set("last_run", final_run)
@@ -338,6 +429,8 @@ def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
         content = "Done. I've updated the dashboard with the current coordination state."
 
     if run and run.delegated_tasks:
+        if agent_setup_failure(content):
+            return routing_response_with_setup_issue(run, content)
         if worker_result_needs_recovery(content):
             return content
         return f"{content}\n\nI've kept the machine routing and task details in the dashboard."
@@ -428,7 +521,32 @@ def worker_result_needs_recovery(content: str) -> bool:
             "could not access the project workspace",
             "selected local-agent command is not callable",
             "no completed result came back",
+            "cli command was not reachable",
         ]
+    )
+
+
+def agent_setup_failure(content: str) -> bool:
+    lowered = content.lower()
+    return (
+        "was selected, but its cli command was not reachable" in lowered
+        or "is selected, but not connected for headless runs" in lowered
+        or "selected local-agent command is not callable" in lowered
+    )
+
+
+def routing_response_with_setup_issue(run: OrchestrationRun, setup_message: str) -> str:
+    assignments = "\n".join(
+        f"- `{task.role}` -> `{task.assigned_machine}` via `{task.preferred_backend}` (`{task.status}`)"
+        for task in run.delegated_tasks
+    )
+    setup_line = first_content_line(setup_message)
+    return (
+        "I routed the work, but one assigned local agent is not connected for headless execution yet.\n\n"
+        f"{assignments}\n\n"
+        f"Setup needed: {setup_line}\n\n"
+        "The dashboard will keep showing which machine owns each role. Connect the missing local CLI/API on "
+        "that machine, then rerun the task."
     )
 
 
@@ -1620,6 +1738,7 @@ async def show_dashboard_sidebar(
 def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     project = cl.user_session.get("project_space")
     last_goal = str(cl.user_session.get("last_goal") or "")
+    tasks_snapshot = dashboard_tasks_snapshot()
     selected_backend = selected_chat_backend()
     selected_ready = backend_is_callable(selected_backend)
     local_capabilities = agent_roles if not selected_ready else infer_machine_capabilities(
@@ -1676,17 +1795,24 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         },
         "repo": {
             "has_goal": bool(last_goal),
-            "worker_outputs": "waiting for task",
+            "worker_outputs": repo_worker_outputs(tasks_snapshot),
             "canonical": "waiting for workspace decision",
             "merge": "waiting for worker outputs",
         },
-        "run": dashboard_run_props(),
-        "machines": [machine_dashboard_props(machine) for machine in machines],
+        "run": dashboard_run_props(tasks_snapshot),
+        "machines": [machine_dashboard_props(machine, tasks_snapshot) for machine in machines],
     }
 
 
-def machine_dashboard_props(machine: MachineNode) -> dict:
+def machine_dashboard_props(machine: MachineNode, tasks: list[DelegatedTask] | None = None) -> dict:
     age = datetime.now(UTC) - machine.last_seen
+    assignments = [
+        task_dashboard_props(task)
+        for task in (tasks or [])
+        if task.assigned_machine == machine.machine_id and task.status in {"delegated", "running"}
+    ][:4]
+    active_roles = unique_preserving_order([task["role"] for task in assignments])
+    visible_capabilities = unique_preserving_order([*active_roles, *machine.capabilities])
     return {
         "machine_id": machine.machine_id,
         "hostname": machine.hostname,
@@ -1694,22 +1820,26 @@ def machine_dashboard_props(machine: MachineNode) -> dict:
         "status": machine.status,
         "status_label": _machine_status(machine),
         "seen_seconds": max(0, int(age.total_seconds())),
-        "capabilities": machine.capabilities,
+        "capabilities": visible_capabilities,
         "agent_backends": machine.agent_backends,
+        "active_roles": active_roles,
+        "assignments": assignments,
     }
 
 
-def dashboard_run_props() -> dict:
+def dashboard_run_props(tasks_snapshot: list[DelegatedTask] | None = None) -> dict:
     run = cl.user_session.get("last_run")
     if not run:
+        tasks = recent_dashboard_tasks("", tasks_snapshot)
+        latest = (tasks_snapshot or [None])[0]
         return {
             "run_id": "",
-            "goal": "",
+            "goal": latest.goal if latest else "",
             "orchestrator_machine": "",
             "turns": [],
-            "tasks": [],
+            "tasks": tasks,
         }
-    tasks = recent_dashboard_tasks(getattr(run, "run_id", ""))
+    tasks = recent_dashboard_tasks(getattr(run, "run_id", ""), tasks_snapshot)
     return {
         "run_id": getattr(run, "run_id", ""),
         "goal": getattr(run, "goal", ""),
@@ -1728,25 +1858,58 @@ def dashboard_run_props() -> dict:
     }
 
 
-def recent_dashboard_tasks(run_id: str) -> list[dict]:
-    if not run_id:
-        return []
+def recent_dashboard_tasks(run_id: str, tasks_snapshot: list[DelegatedTask] | None = None) -> list[dict]:
     try:
-        tasks = coordination.list_tasks()
+        tasks = tasks_snapshot if tasks_snapshot is not None else coordination.list_tasks()
     except CoordinationError:
         return []
     if run_id:
         tasks = [task for task in tasks if task.run_id == run_id]
-    return [
-        {
-            "role": task.role,
-            "machine": task.assigned_machine,
-            "backend": task.preferred_backend,
-            "status": task.status,
-            "title": task.title,
-        }
-        for task in tasks[-8:]
-    ]
+    return [task_dashboard_props(task) for task in list(reversed(tasks[:8]))]
+
+
+def dashboard_tasks_snapshot(limit: int = 50) -> list[DelegatedTask]:
+    try:
+        return coordination.list_tasks(limit)
+    except CoordinationError:
+        return []
+
+
+def task_dashboard_props(task: DelegatedTask) -> dict:
+    return {
+        "role": task.role,
+        "machine": task.assigned_machine,
+        "backend": task.preferred_backend,
+        "status": task.status,
+        "title": task.title,
+        "goal": task.goal,
+        "task_id": task.task_id,
+    }
+
+
+def repo_worker_outputs(tasks: list[DelegatedTask]) -> str:
+    if not tasks:
+        return "waiting for task"
+    active = [task for task in tasks if task.status in {"delegated", "running"}]
+    completed = [task for task in tasks if task.status == "completed"]
+    failed = [task for task in tasks if task.status == "failed"]
+    parts = []
+    if active:
+        parts.append(f"{len(active)} active")
+    if completed:
+        parts.append(f"{len(completed)} completed")
+    if failed:
+        parts.append(f"{len(failed)} failed")
+    return ", ".join(parts) or "waiting for worker outputs"
+
+
+def unique_preserving_order(values: list[str]) -> list[str]:
+    result = []
+    for value in values:
+        clean = str(value).strip()
+        if clean and clean not in result:
+            result.append(clean)
+    return result
 
 
 def first_content_line(content: str) -> str:

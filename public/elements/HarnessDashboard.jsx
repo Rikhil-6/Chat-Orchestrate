@@ -25,6 +25,7 @@ function action(name) {
 function MachineCard({ machine, orchestratorId }) {
   const isOrchestrator = machine.machine_id === orchestratorId;
   const status = machine.status_label || machine.status || "unknown";
+  const assignments = machine.assignments || [];
   return (
     <Card className={isOrchestrator ? "border-primary/70" : ""}>
       <CardHeader className="pb-3">
@@ -56,6 +57,25 @@ function MachineCard({ machine, orchestratorId }) {
             <span className="text-[11px] text-muted-foreground">Agent backend advertises after selection</span>
           )}
         </div>
+        {assignments.length > 0 && (
+          <div className="space-y-1.5 rounded-md border border-primary/30 bg-primary/5 p-2">
+            <div className="text-[11px] font-semibold text-primary">Active assignment</div>
+            {assignments.map((task) => (
+              <div key={task.task_id || `${task.role}-${task.status}`} className="grid gap-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant={task.status === "running" ? "default" : "secondary"} className="text-[11px]">
+                    {task.status}
+                  </Badge>
+                  <Badge variant="outline" className="text-[11px]">
+                    {task.role}
+                  </Badge>
+                  <span className="text-[11px] text-muted-foreground">via {task.backend}</span>
+                </div>
+                <div className="truncate text-[11px] text-muted-foreground">{task.title}</div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex flex-wrap gap-1.5">
           {(machine.capabilities || []).length > 0 ? (
             (machine.capabilities || []).slice(0, 8).map((capability) => (

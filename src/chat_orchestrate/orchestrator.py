@@ -67,12 +67,18 @@ class Orchestrator:
         coordination: CoordinationManager | None = None,
         delegated_task_wait_seconds: float = 30.0,
         progress_interval_seconds: float = 3.0,
+        delegated_task_ack_seconds: float = 6.0,
     ) -> None:
         self.client = client
         self.agents = [AGENT_LIBRARY[name] for name in agent_names if name in AGENT_LIBRARY]
         self.coordination = coordination
         self.delegated_task_wait_seconds = delegated_task_wait_seconds
         self.progress_interval_seconds = progress_interval_seconds
+        self.delegated_task_ack_seconds = (
+            0.0
+            if delegated_task_wait_seconds <= 0
+            else min(delegated_task_ack_seconds, delegated_task_wait_seconds)
+        )
         if not self.agents:
             self.agents = list(AGENT_LIBRARY.values())
 
@@ -167,18 +173,58 @@ class Orchestrator:
     ) -> AsyncIterator[ProgressUpdate | AgentTurn]:
         task = self._task_for_role(run, self._agent_key(agent))
         yield self._agent_start_progress(agent, task, run)
+        if self._agent_key(agent) == "coordinator" and run.delegated_tasks:
+            output = self._fast_coordinator_result(run)
+            await self._complete_local_task(task, output)
+            yield ProgressUpdate(
+                message="Coordinator routing is ready; skipping a redundant local agent pass and moving directly to assigned work.",
+                phase="coordinator-ready",
+                agent=agent.name,
+                role=task.role if task else agent.role,
+                assigned_machine=task.assigned_machine if task else run.orchestrator_machine,
+                preferred_backend=task.preferred_backend if task else None,
+                task_id=task.task_id if task else None,
+            )
+            yield AgentTurn(
+                agent=agent.name,
+                role=agent.role,
+                content=output,
+                assigned_machine=self._assigned_machine_for_role(run, self._agent_key(agent)),
+                preferred_backend=self._preferred_backend_for_role(run, self._agent_key(agent)),
+            )
+            return
         output = ""
         async for update in self.run_agent_with_progress(agent, project, goal, context, task):
             if isinstance(update, ProgressUpdate):
                 yield update
             else:
                 output = update
+        await self._complete_local_task(task, output)
         yield AgentTurn(
             agent=agent.name,
             role=agent.role,
             content=output,
             assigned_machine=self._assigned_machine_for_role(run, self._agent_key(agent)),
             preferred_backend=self._preferred_backend_for_role(run, self._agent_key(agent)),
+        )
+
+    async def _complete_local_task(self, task: DelegatedTask | None, output: str) -> None:
+        if task is None or self.coordination is None:
+            return
+        if task.assigned_machine != self.coordination.machine_id:
+            return
+        await asyncio.to_thread(self.coordination.complete_task, task.task_id, output)
+
+    def _fast_coordinator_result(self, run: OrchestrationRun) -> str:
+        assignments = "\n".join(
+            f"- {task.role}: `{task.assigned_machine}` via `{task.preferred_backend}` ({task.status})"
+            for task in run.delegated_tasks
+        )
+        return (
+            "Coordinator routing is ready.\n\n"
+            f"Goal: {run.goal}\n\n"
+            f"Assignments:\n{assignments}\n\n"
+            "I will watch the delegated task statuses and merge returned worker outputs."
         )
 
     async def _execute_agent_batch(
@@ -480,7 +526,7 @@ class Orchestrator:
         if task.assigned_machine == self.coordination.machine_id:
             return await self.client.run_agent(agent, project, goal, context)
 
-        completed = await self._wait_for_delegated_task(task)
+        completed = await self._wait_for_delegated_task(task, self.delegated_task_ack_seconds)
         if completed and completed.status == "failed":
             return (
                 f"`{completed.preferred_backend}` on `{completed.assigned_machine}` reported a tool-access failure "
@@ -489,10 +535,10 @@ class Orchestrator:
             )
         if completed and completed.result:
             return f"`{completed.preferred_backend}` result from `{completed.assigned_machine}`\n\n{completed.result}"
+        status = completed.status if completed else task.status
         return (
-            f"Delegated `{agent.name}` to `{task.assigned_machine}` via `{task.preferred_backend}`, "
-            "but no completed result came back before the local wait window ended. Make sure that "
-            "machine is connected and has its UI or worker running with real local-agent execution enabled."
+            f"`{agent.name}` is handed off to `{task.assigned_machine}` via `{task.preferred_backend}`. "
+            f"Current status is `{status}`; that machine will keep working and report back through the dashboard."
         )
 
     def _friendly_worker_failure(self, result: str) -> str:
@@ -534,10 +580,11 @@ class Orchestrator:
             yield self._agent_wait_progress(agent, task, elapsed, tick, observed_task)
         yield await work
 
-    async def _wait_for_delegated_task(self, task: DelegatedTask) -> DelegatedTask | None:
-        if self.coordination is None or self.delegated_task_wait_seconds <= 0:
+    async def _wait_for_delegated_task(self, task: DelegatedTask, wait_seconds: float | None = None) -> DelegatedTask | None:
+        wait_seconds = self.delegated_task_wait_seconds if wait_seconds is None else wait_seconds
+        if self.coordination is None or wait_seconds <= 0:
             return None
-        deadline = asyncio.get_running_loop().time() + self.delegated_task_wait_seconds
+        deadline = asyncio.get_running_loop().time() + wait_seconds
         while asyncio.get_running_loop().time() < deadline:
             current = await asyncio.to_thread(self.coordination.get_task, task.task_id)
             if current and current.status in {"completed", "failed"}:

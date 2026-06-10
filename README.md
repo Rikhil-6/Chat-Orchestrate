@@ -131,7 +131,7 @@ CLUSTER_ID=friends-project
 COORDINATION_TOKEN=share-this-out-of-band
 ```
 
-The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`. When a goal mentions backend/frontend work, the planner can create specialist backend and frontend tasks. A connected Chainlit app also runs a lightweight local worker while it is open, so another machine can claim its assigned task and return the result through the coordinator.
+The AI delegation pass records role-specific tasks against available machines and chooses a preferred backend, such as `codex`, `claude-code`, `openswarm`, or `simulated`. When a goal mentions backend/frontend work, the planner can create specialist backend and frontend tasks. A connected Chainlit app also runs a lightweight local worker while it is open, so another machine can claim its assigned task and return the result through the coordinator. The main chat uses `DELEGATED_TASK_ACK_SECONDS` to wait only briefly for remote workers to claim or finish before responding; longer-running worker status continues in the dashboard.
 
 Chainlit also shows a compact **Cluster Roster** plus a **Machine Status** panel on startup. The roster is updated as you interact with the app and shows each connected machine, status, role, agent backends, and the currently selected local chat backend. If two laptops both show `Online 1`, open `/connect`; they are probably each using their own local state file.
 

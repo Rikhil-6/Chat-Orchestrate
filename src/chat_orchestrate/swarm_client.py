@@ -12,6 +12,7 @@ from .backends import (
     command_for_backend,
     detect_agent_backends,
     extract_response_text,
+    task_command_args,
 )
 from .config import Settings
 from .models import AgentSpec, ProjectSpace
@@ -108,7 +109,7 @@ class LocalAgentCliClient(SwarmClient):
             f"Context from prior agents:\n{context or 'No prior context.'}"
         )
         for backend in self._ordered_backends():
-            output = await self._run_backend(backend, prompt)
+            output = await self._run_backend(backend, prompt, project)
             if output:
                 return f"`{backend}` local response\n\n{output}"
             if backend == CODEX_BACKEND:
@@ -128,17 +129,13 @@ class LocalAgentCliClient(SwarmClient):
             return [self.preferred_backend, *[backend for backend in self.backends if backend != self.preferred_backend]]
         return self.backends
 
-    async def _run_backend(self, backend: str, prompt: str) -> str:
+    async def _run_backend(self, backend: str, prompt: str, project: ProjectSpace) -> str:
         command = self._command_for_backend(backend)
         if command is None:
             return ""
-        if backend == CODEX_BACKEND:
-            args = [command, "exec", "--skip-git-repo-check", prompt]
-        elif backend == CLAUDE_CODE_BACKEND:
-            args = [command, "-p", prompt]
-        elif backend == GEMINI_CLI_BACKEND:
-            args = [command, "-p", prompt]
-        else:
+        workspace_path = project.path if project.path.exists() and project.path.is_dir() else None
+        args = task_command_args(backend, command, prompt, workspace_path)
+        if args is None:
             return ""
 
         try:
@@ -146,6 +143,7 @@ class LocalAgentCliClient(SwarmClient):
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=workspace_path,
             )
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
