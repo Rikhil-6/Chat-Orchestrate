@@ -49,7 +49,9 @@ Then run your OpenSwarm API separately:
 swarm-api
 ```
 
-Open Chainlit at [http://localhost:7862](http://localhost:7862).
+Open Chainlit at [http://localhost:7862](http://localhost:7862). The local launcher binds to `0.0.0.0` by default, so `localhost` stays available on the machine running it and the terminal also prints LAN URLs such as `http://<machine-ip>:7862` for other devices on the same Wi-Fi/hotspot. Use `.\scripts\run_local.ps1 -HostName 127.0.0.1` or `./scripts/run_local.sh --host 127.0.0.1` when you want UI access locked to this machine only.
+
+The launcher supervises the local UI and worker: if the Chainlit child exits unexpectedly, it restarts it so localhost comes back; if the worker child drops, it is relaunched while the UI remains up. Press `q` then Enter or Ctrl-C for an intentional clean shutdown. Pass `--no-keepalive` (or `-NoKeepAlive` in PowerShell) for one-shot debugging.
 
 Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex` and `claude`; if neither is available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
 

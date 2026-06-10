@@ -1,8 +1,9 @@
 param(
-    [string]$HostName = "127.0.0.1",
+    [string]$HostName = "0.0.0.0",
     [int]$Port = 7862,
     [string]$MachineId = "",
-    [string]$Backends = ""
+    [string]$Backends = "",
+    [switch]$NoKeepAlive
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,9 @@ if ($MachineId) {
 }
 if ($Backends) {
     $ArgsList += @("--backends", $Backends)
+}
+if ($NoKeepAlive) {
+    $ArgsList += "--no-keepalive"
 }
 
 & $Python @ArgsList

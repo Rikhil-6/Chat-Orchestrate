@@ -184,6 +184,7 @@ function EmptyPlan({ repo }) {
 export default function HarnessDashboard() {
   const refreshing = useRef(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState("");
   const machines = props.machines || [];
   const overview = props.overview || {};
   const workspace = props.workspace || {};
@@ -198,8 +199,11 @@ export default function HarnessDashboard() {
     if (refreshing.current) return;
     refreshing.current = true;
     setIsRefreshing(true);
+    setRefreshError("");
     try {
       await action("refresh_dashboard");
+    } catch (error) {
+      setRefreshError("Refresh could not reach the local UI server. The launcher will bring localhost back if it crashed.");
     } finally {
       refreshing.current = false;
       setIsRefreshing(false);
@@ -231,6 +235,11 @@ export default function HarnessDashboard() {
             )}
           </div>
         </div>
+        {refreshError && (
+          <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+            {refreshError}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-2">
           <Stat label="Coordinator" value={overview.orchestrator_id || "unknown"} />
           <Stat label="Local backend" value={overview.local_backend || "simulated"} />

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import logging
 import os
 import re
 import secrets
@@ -48,6 +49,8 @@ from chat_orchestrate.ui_state import (
     save_credentials,
     save_preferences,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 settings = get_settings()
 agent_backends = [
@@ -1484,7 +1487,10 @@ async def refresh_machines(_: cl.Action) -> None:
 
 @cl.action_callback("refresh_dashboard")
 async def refresh_dashboard(_: cl.Action) -> None:
-    await show_dashboard_sidebar()
+    try:
+        await show_dashboard_sidebar()
+    except Exception:
+        LOGGER.exception("dashboard refresh failed")
 
 
 @cl.action_callback("claim_orchestrator")
