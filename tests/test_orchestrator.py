@@ -24,6 +24,26 @@ class FakeRoutingClient(SwarmClient):
         return f"{agent.name} handled {goal} in {project.name}"
 
 
+class FakeStreamingClient(SwarmClient):
+    async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
+        return f"{agent.name} handled {goal} in {project.name}"
+
+    async def run_agent_events(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str):
+        yield ProgressUpdate(
+            message=f"{agent.name} saw the workspace",
+            phase="agent-output",
+            agent=agent.name,
+            role=agent.role,
+        )
+        yield ProgressUpdate(
+            message=f"{agent.name} noticed a recoverable warning",
+            phase="agent-warning",
+            agent=agent.name,
+            role=agent.role,
+        )
+        yield await self.run_agent(agent, project, goal, context)
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_emits_turns_and_final() -> None:
     project = ProjectSpace(name="demo", path=Path("/tmp/demo"))
@@ -38,6 +58,22 @@ async def test_orchestrator_emits_turns_and_final() -> None:
     assert turns[0].agent == "Coordinator"
     assert turns[1].agent == "Reviewer"
     assert final.final.startswith("## Run")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_streams_agent_updates_before_turn() -> None:
+    project = ProjectSpace(name="demo", path=Path("/tmp/demo"))
+    orchestrator = Orchestrator(FakeStreamingClient(), ["engineer"], progress_interval_seconds=0.01)
+
+    events = [event async for event in orchestrator.run("ship it", project)]
+    progress = [event for event in events if isinstance(event, ProgressUpdate)]
+    turn_index = next(index for index, event in enumerate(events) if isinstance(event, AgentTurn))
+    output_index = next(index for index, event in enumerate(events) if isinstance(event, ProgressUpdate) and event.phase == "agent-output")
+    warning_index = next(index for index, event in enumerate(events) if isinstance(event, ProgressUpdate) and event.phase == "agent-warning")
+
+    assert output_index < turn_index
+    assert warning_index < turn_index
+    assert any(update.message.endswith("recoverable warning") for update in progress)
 
 
 @pytest.mark.asyncio

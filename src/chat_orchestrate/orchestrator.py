@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 from .capabilities import infer_goal_roles
 from .coordination import CoordinationManager
@@ -612,6 +613,20 @@ class Orchestrator:
             f"Current status is `{status}`; that machine will keep working and report back through the dashboard."
         )
 
+    async def _run_or_wait_for_agent_events(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+        task: DelegatedTask | None,
+    ) -> AsyncIterator[ProgressUpdate | str]:
+        if task is None or self.coordination is None or task.assigned_machine == self.coordination.machine_id:
+            async for event in self.client.run_agent_events(agent, project, goal, context):
+                yield event
+            return
+        yield await self._run_or_wait_for_agent(agent, project, goal, context, task)
+
     def _friendly_worker_failure(self, result: str) -> str:
         clean = result.strip()
         lowered = clean.lower()
@@ -636,20 +651,58 @@ class Orchestrator:
         context: str,
         task: DelegatedTask | None,
     ) -> AsyncIterator[ProgressUpdate | str]:
-        work = asyncio.create_task(self._run_or_wait_for_agent(agent, project, goal, context, task))
+        queue: asyncio.Queue[ProgressUpdate | str | None] = asyncio.Queue()
+
+        async def produce() -> None:
+            try:
+                async for event in self._run_or_wait_for_agent_events(agent, project, goal, context, task):
+                    await queue.put(event)
+            finally:
+                await queue.put(None)
+
+        work = asyncio.create_task(produce())
         started = asyncio.get_running_loop().time()
         tick = 0
-        while not work.done():
-            await asyncio.sleep(self.progress_interval_seconds)
-            if work.done():
+        final_output = ""
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=self.progress_interval_seconds)
+            except asyncio.TimeoutError:
+                tick += 1
+                elapsed = int(asyncio.get_running_loop().time() - started)
+                observed_task = None
+                if task is not None and self.coordination is not None:
+                    observed_task = await asyncio.to_thread(self.coordination.get_task, task.task_id)
+                yield self._agent_wait_progress(agent, task, elapsed, tick, observed_task)
+                continue
+
+            if event is None:
                 break
-            tick += 1
-            elapsed = int(asyncio.get_running_loop().time() - started)
-            observed_task = None
-            if task is not None and self.coordination is not None:
-                observed_task = await asyncio.to_thread(self.coordination.get_task, task.task_id)
-            yield self._agent_wait_progress(agent, task, elapsed, tick, observed_task)
-        yield await work
+            if isinstance(event, ProgressUpdate):
+                elapsed = int(asyncio.get_running_loop().time() - started)
+                yield self._scoped_agent_progress(event, task, elapsed)
+                continue
+            final_output = event
+
+        await work
+        yield final_output
+
+    def _scoped_agent_progress(
+        self,
+        update: ProgressUpdate,
+        task: DelegatedTask | None,
+        elapsed: int,
+    ) -> ProgressUpdate:
+        if task is None:
+            return replace(update, elapsed_seconds=update.elapsed_seconds or elapsed)
+        return replace(
+            update,
+            role=update.role or task.role,
+            assigned_machine=update.assigned_machine or task.assigned_machine,
+            preferred_backend=update.preferred_backend or task.preferred_backend,
+            task_id=update.task_id or task.task_id,
+            elapsed_seconds=update.elapsed_seconds or elapsed,
+        )
 
     async def _wait_for_delegated_task(self, task: DelegatedTask, wait_seconds: float | None = None) -> DelegatedTask | None:
         wait_seconds = self.delegated_task_wait_seconds if wait_seconds is None else wait_seconds

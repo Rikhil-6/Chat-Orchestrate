@@ -32,11 +32,12 @@ from chat_orchestrate.backends import (
     discover_backend_commands,
     launch_backend_app,
     run_task,
+    task_workspace_path,
 )
 from chat_orchestrate.capabilities import infer_goal_roles, infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
-from chat_orchestrate.models import DelegatedTask, MachineNode, OrchestrationRun, ProgressUpdate
+from chat_orchestrate.models import AgentSpec, DelegatedTask, MachineNode, OrchestrationRun, ProgressUpdate, ProjectSpace
 from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
@@ -136,39 +137,11 @@ async def run_claimed_ui_task(task) -> None:
         status_message = None
     await show_dashboard_sidebar()
 
-    work = asyncio.create_task(
-        asyncio.to_thread(
-            run_task,
-            task,
-            not settings.use_local_agent_chat,
-            load_command_overrides(),
-            load_openai_api_key(),
-            settings.codex_api_model,
-            settings.workspaces_root,
-        )
-    )
-    started = asyncio.get_running_loop().time()
-    tick = 0
-    while not work.done():
-        await asyncio.sleep(max(2.0, min(5.0, settings.worker_poll_seconds)))
-        if work.done():
-            break
-        tick += 1
-        if status_message is not None:
-            status_message.content = worker_task_status_content(
-                task,
-                "running",
-                int(asyncio.get_running_loop().time() - started),
-                tick,
-            )
-            try:
-                await status_message.update()
-            except Exception:
-                status_message = None
-        await show_dashboard_sidebar()
-
     try:
-        result = await work
+        if settings.use_local_agent_chat and task.preferred_backend != SIMULATED_BACKEND:
+            result = await run_claimed_ui_task_live(task, status_message)
+        else:
+            result = await run_claimed_ui_task_buffered(task, status_message)
     except Exception as exc:  # pragma: no cover - defensive UI worker boundary
         try:
             coordination.complete_task(task.task_id, str(exc), status="failed")
@@ -192,6 +165,91 @@ async def run_claimed_ui_task(task) -> None:
             except Exception:
                 pass
     await show_dashboard_sidebar()
+
+
+async def run_claimed_ui_task_buffered(task, status_message: cl.Message | None) -> str:
+    work = asyncio.create_task(
+        asyncio.to_thread(
+            run_task,
+            task,
+            not settings.use_local_agent_chat,
+            load_command_overrides(),
+            load_openai_api_key(),
+            settings.codex_api_model,
+            settings.workspaces_root,
+        )
+    )
+    started = asyncio.get_running_loop().time()
+    tick = 0
+    while not work.done():
+        await asyncio.sleep(max(2.0, min(5.0, settings.worker_poll_seconds)))
+        if work.done():
+            break
+        tick += 1
+        await update_worker_status_message(
+            status_message,
+            task,
+            "running",
+            int(asyncio.get_running_loop().time() - started),
+            tick,
+        )
+        await show_dashboard_sidebar()
+    return await work
+
+
+async def run_claimed_ui_task_live(task, status_message: cl.Message | None) -> str:
+    workspace_path = task_workspace_path(task, settings.workspaces_root) or (settings.workspaces_root / task.project)
+    project = ProjectSpace(name=task.project, path=workspace_path)
+    agent = AgentSpec(
+        name=task.role.replace("-", " ").title(),
+        role=task.role,
+        instructions=f"Handle the `{task.role}` slice of this distributed project run.",
+    )
+    goal = (
+        f"You are the `{task.role}` agent for a distributed project run.\n\n"
+        f"Task: {task.title}\n"
+        f"Project space: {task.project}\n"
+        f"Project path: {workspace_path}\n\n"
+        f"Goal:\n{task.goal}\n\n"
+        "Work concretely in the project space when possible. Surface blockers, sandbox/tool errors, "
+        "files changed, commands run, and preview or verification details."
+    )
+    client = build_swarm_client(settings, task.preferred_backend, load_command_overrides(), load_openai_api_key())
+    started = asyncio.get_running_loop().time()
+    tick = 0
+    result = ""
+    async for event in client.run_agent_events(agent, project, goal, ""):
+        if isinstance(event, ProgressUpdate):
+            tick += 1
+            await update_worker_status_message(
+                status_message,
+                task,
+                "running",
+                int(asyncio.get_running_loop().time() - started),
+                tick,
+                event.message,
+            )
+            await show_dashboard_sidebar()
+            continue
+        result = event
+    return result
+
+
+async def update_worker_status_message(
+    status_message: cl.Message | None,
+    task,
+    phase: str,
+    elapsed: int = 0,
+    tick: int = 0,
+    result: str = "",
+) -> None:
+    if status_message is None:
+        return
+    status_message.content = worker_task_status_content(task, phase, elapsed, tick, result)
+    try:
+        await status_message.update()
+    except Exception:
+        pass
 
 
 def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0, result: str = "") -> str:
@@ -220,6 +278,9 @@ def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0
         ]
         lines.append("")
         lines.append(f"Status: {activities[(tick - 1) % len(activities)]}. Elapsed `{elapsed}s`.")
+        if result:
+            lines.append("")
+            lines.append(f"Latest agent signal: {first_content_line(result)[:360]}")
     elif phase == "completed":
         lines.append("")
         lines.append("Returned the result to the coordinator.")
@@ -496,6 +557,12 @@ async def run_status_call(
 
 
 def progress_key(update: ProgressUpdate) -> str:
+    if update.phase in {"agent-output", "agent-warning", "agent-error"}:
+        machine = update.assigned_machine or "local"
+        role = update.role or "agent"
+        backend = update.preferred_backend or "backend"
+        fingerprint = abs(hash((update.phase, machine, role, backend, update.message)))
+        return f"stream:{machine}:{role}:{backend}:{update.elapsed_seconds}:{fingerprint}"
     if update.task_id:
         return f"task:{update.task_id}"
     if update.role:
@@ -504,7 +571,7 @@ def progress_key(update: ProgressUpdate) -> str:
 
 
 def render_progress(items: dict[str, str]) -> str:
-    lines = list(items.values())[-8:]
+    lines = list(items.values())[-10:]
     return "## Coordination Status\n\n" + "\n".join(lines)
 
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import threading
+from collections.abc import AsyncIterator
+
 import httpx
 
 from .backends import (
@@ -15,12 +19,21 @@ from .backends import (
     task_command_args,
 )
 from .config import Settings
-from .models import AgentSpec, ProjectSpace
+from .models import AgentSpec, ProgressUpdate, ProjectSpace
 
 
 class SwarmClient:
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
         raise NotImplementedError
+
+    async def run_agent_events(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+    ) -> AsyncIterator[ProgressUpdate | str]:
+        yield await self.run_agent(agent, project, goal, context)
 
 
 class OpenSwarmClient(SwarmClient):
@@ -63,6 +76,28 @@ class OpenSwarmClient(SwarmClient):
 class LocalPreviewSwarmClient(SwarmClient):
     """Deterministic fallback for UI and workflow testing without external services."""
 
+    async def run_agent_events(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+    ) -> AsyncIterator[ProgressUpdate | str]:
+        yield ProgressUpdate(
+            message=f"{agent.name} preview is reading `{project.name}` and the current handoff context.",
+            phase="agent-output",
+            agent=agent.name,
+            role=agent.role,
+        )
+        await asyncio.sleep(0)
+        yield ProgressUpdate(
+            message=f"{agent.name} preview found no blocking local tool errors.",
+            phase="agent-output",
+            agent=agent.name,
+            role=agent.role,
+        )
+        yield await self.run_agent(agent, project, goal, context)
+
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
         context_note = "with prior context" if context else "as the first pass"
         return (
@@ -96,7 +131,52 @@ class LocalAgentCliClient(SwarmClient):
         self.preview = LocalPreviewSwarmClient()
 
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
-        prompt = (
+        final = ""
+        async for event in self.run_agent_events(agent, project, goal, context):
+            if isinstance(event, str):
+                final = event
+        return final
+
+    async def run_agent_events(
+        self,
+        agent: AgentSpec,
+        project: ProjectSpace,
+        goal: str,
+        context: str,
+    ) -> AsyncIterator[ProgressUpdate | str]:
+        prompt = self._agent_prompt(agent, project, goal, context)
+        for backend in self._ordered_backends():
+            async for event in self._run_backend_events(backend, prompt, project, agent):
+                if isinstance(event, ProgressUpdate):
+                    yield event
+                    continue
+                if event:
+                    yield f"`{backend}` local response\n\n{event}"
+                    return
+            if backend == CODEX_BACKEND:
+                yield ProgressUpdate(
+                    message="Codex CLI did not return output; checking the configured API fallback.",
+                    phase="agent-output",
+                    agent=agent.name,
+                    role=agent.role,
+                    preferred_backend=backend,
+                )
+                api_output = await self._run_codex_api(prompt)
+                if api_output:
+                    yield f"`{backend}` API response\n\n{api_output}"
+                    return
+            if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
+                yield (
+                    f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
+                    f"Tried command: `{self._configured_command_label(backend)}`\n\n"
+                    f"{backend_execution_hint(backend)}"
+                )
+                return
+        async for event in self.preview.run_agent_events(agent, project, goal, context):
+            yield event
+
+    def _agent_prompt(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
+        return (
             f"You are {agent.name}, acting as {agent.role}.\n"
             f"{agent.instructions}\n\n"
             "Be concrete, linguistic, and useful. If the user asks for implementation, propose or perform "
@@ -108,21 +188,6 @@ class LocalAgentCliClient(SwarmClient):
             f"User message:\n{goal}\n\n"
             f"Context from prior agents:\n{context or 'No prior context.'}"
         )
-        for backend in self._ordered_backends():
-            output = await self._run_backend(backend, prompt, project)
-            if output:
-                return f"`{backend}` local response\n\n{output}"
-            if backend == CODEX_BACKEND:
-                api_output = await self._run_codex_api(prompt)
-                if api_output:
-                    return f"`{backend}` API response\n\n{api_output}"
-            if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
-                return (
-                    f"`{backend}` was selected, but its CLI command was not reachable from this app process.\n\n"
-                    f"Tried command: `{self._configured_command_label(backend)}`\n\n"
-                    f"{backend_execution_hint(backend)}"
-                )
-        return await self.preview.run_agent(agent, project, goal, context)
 
     def _ordered_backends(self) -> list[str]:
         if self.preferred_backend != "auto":
@@ -130,30 +195,155 @@ class LocalAgentCliClient(SwarmClient):
         return self.backends
 
     async def _run_backend(self, backend: str, prompt: str, project: ProjectSpace) -> str:
+        final = ""
+        dummy_agent = AgentSpec(name=backend, role=backend, instructions="")
+        async for event in self._run_backend_events(backend, prompt, project, dummy_agent):
+            if isinstance(event, str):
+                final = event
+        return final
+
+    async def _run_backend_events(
+        self,
+        backend: str,
+        prompt: str,
+        project: ProjectSpace,
+        agent: AgentSpec,
+    ) -> AsyncIterator[ProgressUpdate | str]:
         command = self._command_for_backend(backend)
         if command is None:
-            return ""
+            yield ProgressUpdate(
+                message=f"{backend} command is not reachable from this app process.",
+                phase="agent-warning",
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=backend,
+            )
+            yield ""
+            return
         workspace_path = project.path if project.path.exists() and project.path.is_dir() else None
         args = task_command_args(backend, command, prompt, workspace_path)
         if args is None:
-            return ""
+            yield ProgressUpdate(
+                message=f"{backend} has no runnable command template yet.",
+                phase="agent-warning",
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=backend,
+            )
+            yield ""
+            return
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=workspace_path,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self.settings.local_agent_timeout_seconds,
+        except OSError as exc:
+            yield ProgressUpdate(
+                message=f"{backend} could not start: {exc}",
+                phase="agent-error",
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=backend,
             )
-        except (OSError, asyncio.TimeoutError):
-            return ""
+            yield ""
+            return
 
-        output = stdout.decode(errors="replace").strip() or stderr.decode(errors="replace").strip()
-        return output
+        output_parts: list[str] = []
+        error_parts: list[str] = []
+        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def put_thread_event(label: str, line: str = "") -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, (label, line))
+
+        def pump_stream(stream, label: str) -> None:
+            if stream is None:
+                put_thread_event(f"{label}-done")
+                return
+            try:
+                for raw in iter(stream.readline, ""):
+                    clean = raw.strip()
+                    if clean:
+                        put_thread_event(label, clean)
+            finally:
+                put_thread_event(f"{label}-done")
+
+        def wait_for_process() -> None:
+            put_thread_event("process-done", str(process.wait()))
+
+        threading.Thread(target=pump_stream, args=(process.stdout, "stdout"), daemon=True).start()
+        threading.Thread(target=pump_stream, args=(process.stderr, "stderr"), daemon=True).start()
+        threading.Thread(target=wait_for_process, daemon=True).start()
+
+        started = loop.time()
+        deadline = started + self.settings.local_agent_timeout_seconds
+        streams_remaining = 2
+        process_done = False
+        return_code = 0
+
+        while True:
+            if process_done and streams_remaining <= 0 and queue.empty():
+                break
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                process.kill()
+                yield ProgressUpdate(
+                    message=f"{backend} timed out after {int(self.settings.local_agent_timeout_seconds)}s.",
+                    phase="agent-error",
+                    agent=agent.name,
+                    role=agent.role,
+                    preferred_backend=backend,
+                    elapsed_seconds=int(loop.time() - started),
+                )
+                yield "\n".join(output_parts or error_parts).strip()
+                return
+            try:
+                label, line = await asyncio.wait_for(queue.get(), timeout=min(0.5, remaining))
+            except asyncio.TimeoutError:
+                continue
+            if label == "process-done":
+                process_done = True
+                try:
+                    return_code = int(line)
+                except ValueError:
+                    return_code = 1
+                continue
+            if label.endswith("-done"):
+                streams_remaining -= 1
+                continue
+            if label == "stderr":
+                error_parts.append(line)
+                phase = "agent-warning"
+                stream_label = "stderr"
+            else:
+                output_parts.append(line)
+                phase = "agent-output"
+                stream_label = "output"
+            yield ProgressUpdate(
+                message=f"{backend} {stream_label}: {self._trim_stream_line(line)}",
+                phase=phase,
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=backend,
+                elapsed_seconds=int(loop.time() - started),
+            )
+
+        if return_code != 0:
+            yield ProgressUpdate(
+                message=f"{backend} exited with code {return_code}.",
+                phase="agent-error",
+                agent=agent.name,
+                role=agent.role,
+                preferred_backend=backend,
+                elapsed_seconds=int(loop.time() - started),
+            )
+        yield "\n".join(output_parts or error_parts).strip()
 
     async def _run_codex_api(self, prompt: str) -> str:
         if not self.openai_api_key:
@@ -192,6 +382,12 @@ class LocalAgentCliClient(SwarmClient):
             if backend == GEMINI_CLI_BACKEND
             else backend
         )
+
+    def _trim_stream_line(self, line: str, limit: int = 260) -> str:
+        clean = " ".join(line.split())
+        if len(clean) <= limit:
+            return clean
+        return f"{clean[: limit - 1]}..."
 
 
 def build_swarm_client(
