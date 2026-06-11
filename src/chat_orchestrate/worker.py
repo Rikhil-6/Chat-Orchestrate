@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 
-from .backends import detect_agent_backends, run_task
+from .backends import CLAUDE_CODE_BACKEND, CODEX_BACKEND, GEMINI_CLI_BACKEND, detect_agent_backends, run_task
 from .capabilities import infer_machine_capabilities
 from .config import Settings, get_settings
 from .coordination import CoordinationError, CoordinationManager
@@ -79,6 +79,13 @@ async def run_worker(settings: Settings | None = None) -> None:
                 command_overrides=settings.command_overrides,
                 openai_api_key=settings.openai_api_key,
                 codex_api_model=settings.codex_api_model,
+                api_keys={
+                    CODEX_BACKEND: settings.openai_api_key,
+                    CLAUDE_CODE_BACKEND: settings.claude_api_key,
+                    GEMINI_CLI_BACKEND: settings.gemini_api_key,
+                },
+                claude_api_model=settings.claude_api_model,
+                gemini_api_model=settings.gemini_api_model,
                 workspaces_root=settings.workspaces_root,
             )
         except Exception as exc:  # pragma: no cover - defensive worker boundary

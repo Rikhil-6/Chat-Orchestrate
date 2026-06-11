@@ -175,7 +175,7 @@ def network_addresses() -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Chainlit UI and local worker together.")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default="7862")
     parser.add_argument("--machine-id", default="")
     parser.add_argument("--backends", default="")

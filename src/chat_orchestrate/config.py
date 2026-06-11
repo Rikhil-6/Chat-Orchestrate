@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     open_swarm_timeout_seconds: int = 90
     openai_api_key: str = ""
     codex_api_model: str = "gpt-5.3-codex"
+    claude_api_key: str = ""
+    claude_api_model: str = "claude-sonnet-4-5"
+    gemini_api_key: str = ""
+    gemini_api_model: str = "gemini-2.0-flash"
 
     workspaces_root: Path = Path("./workspaces")
     workspace_state_path: Path = Path("./workspace_state.json")

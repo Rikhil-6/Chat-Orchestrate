@@ -24,6 +24,18 @@ class FakeRoutingClient(SwarmClient):
         return f"{agent.name} handled {goal} in {project.name}"
 
 
+class FakeVisualRoutingClient(SwarmClient):
+    async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
+        if agent.name == "Routing Planner":
+            return (
+                '{"roles":["coordinator","frontend","reviewer"],"assignments":['
+                '{"role":"frontend","machine_id":"sg-akc-dt330","reason":"model saw visual feedback"},'
+                '{"role":"reviewer","machine_id":"sg-akc-dt330","reason":"model wants verification"}'
+                ']}'
+            )
+        return f"{agent.name} handled {goal} in {project.name}"
+
+
 class FakeStreamingClient(SwarmClient):
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
         return f"{agent.name} handled {goal} in {project.name}"
@@ -120,3 +132,71 @@ async def test_orchestrator_uses_reasoned_routing_assignments(tmp_path: Path) ->
 
     assert by_role["backend"].assigned_machine == "desktop-p4k08ab"
     assert by_role["frontend"].assigned_machine == "sg-akc-dt330"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_accepts_model_inferred_roles_not_keyword_hints(tmp_path: Path) -> None:
+    from chat_orchestrate.coordination import CoordinationManager
+
+    state = tmp_path / "coordination.json"
+    host = CoordinationManager(
+        state,
+        "sg-akc-dt330",
+        ["coordinator", "frontend", "reviewer"],
+        ["codex"],
+        cluster_id="test",
+        coordination_token="secret",
+    )
+    host.claim_orchestrator()
+
+    project = ProjectSpace(name="demo", path=tmp_path / "demo")
+    orchestrator = Orchestrator(
+        FakeVisualRoutingClient(),
+        ["coordinator"],
+        host,
+        delegated_task_wait_seconds=0,
+        progress_interval_seconds=0.01,
+    )
+    events = [
+        event
+        async for event in orchestrator.run(
+            "the colours feel off for the video site",
+            project,
+        )
+    ]
+    final = next(event for event in events if isinstance(event, OrchestrationRun))
+    roles = {task.role for task in final.delegated_tasks}
+
+    assert {"coordinator", "frontend", "reviewer"}.issubset(roles)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_only_plan_runs_the_actual_coordinator_agent(tmp_path: Path) -> None:
+    from chat_orchestrate.coordination import CoordinationManager
+
+    state = tmp_path / "coordination.json"
+    host = CoordinationManager(
+        state,
+        "sg-akc-dt330",
+        ["coordinator"],
+        ["codex"],
+        cluster_id="test",
+        coordination_token="secret",
+    )
+    host.claim_orchestrator()
+
+    project = ProjectSpace(name="demo", path=tmp_path / "demo")
+    orchestrator = Orchestrator(
+        FakeClient(),
+        ["coordinator"],
+        host,
+        delegated_task_wait_seconds=0,
+        progress_interval_seconds=0.01,
+        conversation_context="User: make the page more YouTube-like\nAssistant: I updated the workspace.",
+    )
+    events = [event async for event in orchestrator.run("try again?", project)]
+    turns = [event for event in events if isinstance(event, AgentTurn)]
+
+    assert turns
+    assert turns[-1].content == "Coordinator handled try again? in demo"
+    assert "Coordinator routing is ready" not in turns[-1].content

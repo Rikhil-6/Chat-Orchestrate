@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import socket
+import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,25 +67,26 @@ class CoordinationManager:
             )
 
     def heartbeat(self) -> MachineNode:
-        state = self._load()
-        now = datetime.now(UTC)
-        orchestrator = self._active_orchestrator_id(state, now)
-        if state.get("orchestrator_machine") == self.machine_id:
-            orchestrator = self.machine_id
-        role = "orchestrator" if orchestrator == self.machine_id else "worker"
+        with self._state_lock():
+            state = self._load()
+            now = datetime.now(UTC)
+            orchestrator = self._active_orchestrator_id(state, now)
+            if state.get("orchestrator_machine") == self.machine_id:
+                orchestrator = self.machine_id
+            role = "orchestrator" if orchestrator == self.machine_id else "worker"
 
-        node = MachineNode(
-            machine_id=self.machine_id,
-            hostname=self.hostname,
-            role=role,
-            status="online",
-            capabilities=self.agent_roles,
-            agent_backends=self.agent_backends,
-            last_seen=now,
-        )
-        state["machines"][self.machine_id] = self._machine_to_json(node)
-        self._save(state)
-        return node
+            node = MachineNode(
+                machine_id=self.machine_id,
+                hostname=self.hostname,
+                role=role,
+                status="online",
+                capabilities=self.agent_roles,
+                agent_backends=self.agent_backends,
+                last_seen=now,
+            )
+            state["machines"][self.machine_id] = self._machine_to_json(node)
+            self._save(state)
+            return node
 
     def list_machines(self) -> list[MachineNode]:
         state = self._load()
@@ -91,31 +94,34 @@ class CoordinationManager:
         return sorted(machines, key=lambda machine: machine.machine_id)
 
     def claim_orchestrator(self) -> MachineNode:
-        state = self._load()
-        state["orchestrator_machine"] = self.machine_id
-        state["orchestrator_claimed_at"] = self._now_text()
-        self._save(state)
+        with self._state_lock():
+            state = self._load()
+            state["orchestrator_machine"] = self.machine_id
+            state["orchestrator_claimed_at"] = self._now_text()
+            self._save(state)
         return self.heartbeat()
 
     def release_orchestrator(self) -> None:
-        state = self._load()
-        if state.get("orchestrator_machine") == self.machine_id:
-            state["orchestrator_machine"] = None
-            state["orchestrator_claimed_at"] = None
-        self._save(state)
+        with self._state_lock():
+            state = self._load()
+            if state.get("orchestrator_machine") == self.machine_id:
+                state["orchestrator_machine"] = None
+                state["orchestrator_claimed_at"] = None
+            self._save(state)
         self.heartbeat()
 
     def get_or_elect_orchestrator(self) -> MachineNode:
-        state = self._load()
-        now = datetime.now(UTC)
-        orchestrator_id = self._active_orchestrator_id(state, now)
+        with self._state_lock():
+            state = self._load()
+            now = datetime.now(UTC)
+            orchestrator_id = self._active_orchestrator_id(state, now)
 
-        if orchestrator_id is None:
-            online = self._online_machines(state, now)
-            orchestrator_id = online[0].machine_id if online else self.machine_id
-            state["orchestrator_machine"] = orchestrator_id
-            state["orchestrator_claimed_at"] = self._now_text()
-            self._save(state)
+            if orchestrator_id is None:
+                online = self._online_machines(state, now)
+                orchestrator_id = online[0].machine_id if online else self.machine_id
+                state["orchestrator_machine"] = orchestrator_id
+                state["orchestrator_claimed_at"] = self._now_text()
+                self._save(state)
 
         self.heartbeat()
         return self._machine_from_json(self._load()["machines"][orchestrator_id])
@@ -128,36 +134,46 @@ class CoordinationManager:
         machine_preferences: dict[str, str] | None = None,
         roles: list[str] | None = None,
     ) -> list[DelegatedTask]:
-        state = self._load()
-        now = datetime.now(UTC)
-        machines = self._online_machines(state, now)
-        if not machines:
-            machines = [self.heartbeat()]
-
-        tasks = []
-        for role in roles or self._roles_for_goal(goal):
-            machine = self._best_machine_for_role(machines, role, goal, (machine_preferences or {}).get(role, ""))
-            preferred_backend = self._preferred_backend_for_role(machine, role, goal)
-            tasks.append(
-                DelegatedTask(
-                    task_id=uuid4().hex,
-                    run_id=run_id,
-                    project=project.name,
-                    goal=goal,
-                    role=role,
-                    title=self._task_title(role, goal),
-                    assigned_machine=machine.machine_id,
-                    preferred_backend=preferred_backend,
-                    status="delegated",
-                    created_at=now,
-                    updated_at=now,
+        with self._state_lock():
+            state = self._load()
+            now = datetime.now(UTC)
+            machines = self._online_machines(state, now)
+            if not machines:
+                fallback_node = MachineNode(
+                    machine_id=self.machine_id,
+                    hostname=self.hostname,
+                    role="worker",
+                    status="online",
+                    capabilities=self.agent_roles,
+                    agent_backends=self.agent_backends,
+                    last_seen=now,
                 )
-            )
+                state["machines"][self.machine_id] = self._machine_to_json(fallback_node)
+                machines = [fallback_node]
 
-        state = self._load()
-        state["tasks"].extend(self._task_to_json(task) for task in tasks)
-        self._save(state)
-        return tasks
+            tasks = []
+            for role in roles or self._roles_for_goal(goal):
+                machine = self._best_machine_for_role(machines, role, goal, (machine_preferences or {}).get(role, ""))
+                preferred_backend = self._preferred_backend_for_role(machine, role, goal)
+                tasks.append(
+                    DelegatedTask(
+                        task_id=uuid4().hex,
+                        run_id=run_id,
+                        project=project.name,
+                        goal=goal,
+                        role=role,
+                        title=self._task_title(role, goal),
+                        assigned_machine=machine.machine_id,
+                        preferred_backend=preferred_backend,
+                        status="delegated",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+            state["tasks"].extend(self._task_to_json(task) for task in tasks)
+            self._save(state)
+            return tasks
 
     def list_tasks(self, limit: int = 20) -> list[DelegatedTask]:
         state = self._load()
@@ -172,31 +188,33 @@ class CoordinationManager:
         return None
 
     def claim_next_task(self) -> DelegatedTask | None:
-        state = self._load()
-        now = datetime.now(UTC)
-        for item in state["tasks"]:
-            if item["assigned_machine"] != self.machine_id:
-                continue
-            if item["status"] != "delegated":
-                continue
-            if item.get("preferred_backend") not in self.agent_backends:
-                continue
-            item["status"] = "running"
-            item["updated_at"] = now.isoformat()
-            self._save(state)
-            return self._task_from_json(item)
-        return None
+        with self._state_lock():
+            state = self._load()
+            now = datetime.now(UTC)
+            for item in state["tasks"]:
+                if item["assigned_machine"] != self.machine_id:
+                    continue
+                if item["status"] != "delegated":
+                    continue
+                if item.get("preferred_backend") not in self.agent_backends:
+                    continue
+                item["status"] = "running"
+                item["updated_at"] = now.isoformat()
+                self._save(state)
+                return self._task_from_json(item)
+            return None
 
     def complete_task(self, task_id: str, result: str, status: str = "completed") -> None:
-        state = self._load()
-        now = self._now_text()
-        for item in state["tasks"]:
-            if item["task_id"] == task_id:
-                item["status"] = status
-                item["result"] = result
-                item["updated_at"] = now
-                break
-        self._save(state)
+        with self._state_lock():
+            state = self._load()
+            now = self._now_text()
+            for item in state["tasks"]:
+                if item["task_id"] == task_id:
+                    item["status"] = status
+                    item["result"] = result
+                    item["updated_at"] = now
+                    break
+            self._save(state)
 
     def _roles_for_goal(self, goal: str) -> list[str]:
         return infer_goal_roles(goal)
@@ -382,6 +400,46 @@ class CoordinationManager:
         ]
         return sorted(online, key=lambda machine: machine.machine_id)
 
+    @contextmanager
+    def _state_lock(self):
+        if self.backend == "http":
+            yield
+            return
+
+        lock_path = self.state_path.with_name(f"{self.state_path.name}.lock")
+        deadline = time.monotonic() + 8.0
+        acquired = False
+        while not acquired:
+            try:
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                lock_path.mkdir()
+                acquired = True
+            except FileExistsError:
+                self._clear_stale_lock(lock_path)
+                if time.monotonic() >= deadline:
+                    raise CoordinationError(f"Timed out waiting for coordinator state lock `{lock_path}`.")
+                time.sleep(0.025)
+
+        try:
+            yield
+        finally:
+            try:
+                lock_path.rmdir()
+            except OSError:
+                pass
+
+    def _clear_stale_lock(self, lock_path: Path) -> None:
+        try:
+            age_seconds = time.time() - lock_path.stat().st_mtime
+        except OSError:
+            return
+        if age_seconds < 30:
+            return
+        try:
+            lock_path.rmdir()
+        except OSError:
+            pass
+
     def _load(self) -> dict:
         if self.backend == "http":
             state = self._http_load()
@@ -447,7 +505,21 @@ class CoordinationManager:
         payload = json.dumps(state, indent=2)
         temp_path = self.state_path.with_name(f"{self.state_path.name}.{uuid4().hex}.tmp")
         temp_path.write_text(payload, encoding="utf-8")
-        temp_path.replace(self.state_path)
+        try:
+            for attempt in range(12):
+                try:
+                    temp_path.replace(self.state_path)
+                    return
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) not in {5, 32} or attempt == 11:
+                        raise
+                    time.sleep(0.025 * (attempt + 1))
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
     def _http_load(self) -> dict:
         return self._http_request("GET").json()

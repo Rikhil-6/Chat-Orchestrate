@@ -229,10 +229,16 @@ def _app_js(brand: str) -> str:
 const fallbackRepos = [
 {repo_literal}
 ];
+const apiBase = (
+  window.CHAT_ORCHESTRATE_API_BASE ||
+  window.FORGEHUB_API_BASE ||
+  window.SEARCHLY_API_BASE ||
+  "http://127.0.0.1:8000"
+).replace(new RegExp("/+$"), "");
 
 async function loadRepos() {{
   try {{
-    const response = await fetch("http://localhost:8000/api/repos");
+    const response = await fetch(`${{apiBase}}/api/repos`);
     if (!response.ok) throw new Error(`API returned ${{response.status}}`);
     return await response.json();
   }} catch (error) {{

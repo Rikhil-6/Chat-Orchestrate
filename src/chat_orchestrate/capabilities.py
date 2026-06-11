@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
+
 ROLE_KEYWORDS = {
     "backend": ["backend", "back-end", "api", "server", "database", "auth", "endpoint"],
     "frontend": ["frontend", "front-end", "ui", "website", "page", "browser", "css", "react"],
     "researcher": ["research", "discover", "compare", "investigate", "explore"],
     "engineer": ["build", "code", "implement", "fix", "add", "launch", "make"],
-    "reviewer": ["test", "review", "qa", "risk", "verify", "check"],
+    "reviewer": ["test", "review", "qa", "risk", "verify", "check", "error", "warning", "404", "not found"],
     "documenter": ["doc", "readme", "deploy", "handoff", "write up", "setup"],
 }
 
@@ -20,10 +22,18 @@ def infer_goal_roles(goal: str, defaults: list[str] | None = None) -> list[str]:
     lowered = goal.lower().strip()
     roles = ["coordinator"]
     for role, keywords in ROLE_KEYWORDS.items():
-        if any(keyword in lowered for keyword in keywords):
+        if any(keyword_matches(lowered, keyword) for keyword in keywords):
             roles.append(role)
 
-    if any(role in roles for role in {"backend", "frontend"}) and _looks_like_work_request(lowered):
+    if (
+        "engineer" in roles
+        and any(role in roles for role in {"backend", "frontend"})
+        and "engineer" not in lowered
+        and "implementation" not in lowered
+    ):
+        roles = [role for role in roles if role != "engineer"]
+
+    if not any(role in roles for role in {"backend", "frontend"}) and _looks_like_work_request(lowered):
         roles.append("engineer")
     return unique(roles)
 
@@ -77,4 +87,13 @@ def _looks_like_work_request(goal: str) -> bool:
         "setup",
         "work",
     }
-    return any(term in goal for term in work_terms)
+    return any(keyword_matches(goal, term) for term in work_terms)
+
+
+def keyword_matches(goal: str, keyword: str) -> bool:
+    clean_keyword = keyword.lower().strip()
+    if not clean_keyword:
+        return False
+    pattern = re.escape(clean_keyword)
+    pattern = pattern.replace(r"\ ", r"[\s-]+")
+    return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", goal) is not None

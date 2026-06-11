@@ -17,7 +17,19 @@ import httpx
 from chainlit.input_widget import Select, Switch, TextInput
 
 from chat_orchestrate.a2a import A2A_PROTOCOL_VERSION
-from chat_orchestrate.artifacts import artifacts_markdown, preview_command, scan_project_artifacts, work_proof_summary
+from chat_orchestrate.artifacts import (
+    artifacts_markdown,
+    build_evaluation,
+    build_evaluation_summary,
+    preview_backend_url,
+    preview_command,
+    preview_frontend_url,
+    save_project_preview_ports,
+    scan_project_artifacts,
+    task_completion_stats,
+    work_proof_summary,
+    workspace_layout_markdown,
+)
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
@@ -34,7 +46,7 @@ from chat_orchestrate.backends import (
     run_task,
     task_workspace_path,
 )
-from chat_orchestrate.capabilities import infer_goal_roles, infer_machine_capabilities
+from chat_orchestrate.capabilities import infer_machine_capabilities
 from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import AgentSpec, DelegatedTask, MachineNode, OrchestrationRun, ProgressUpdate, ProjectSpace
@@ -42,15 +54,21 @@ from chat_orchestrate.orchestrator import Orchestrator
 from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
 from chat_orchestrate.summaries import summarize_goal
-from chat_orchestrate.swarm_client import build_swarm_client, workspace_write_contract
+from chat_orchestrate.swarm_client import build_swarm_client, is_benign_agent_stderr, workspace_write_contract
 from chat_orchestrate.ui_state import (
     append_chat,
+    archive_chat_thread,
+    chat_thread_state,
     clear_chat_history,
+    create_chat_thread,
     load_chat_history,
     load_credentials,
     load_preferences,
+    rename_chat_thread,
     save_credentials,
     save_preferences,
+    set_chat_thread_project,
+    set_active_chat_thread,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -323,10 +341,19 @@ def initial_project_space() -> ProjectSpace:
     return ensure_project_space("default")
 
 
+def initial_project_space_for_chat(chat_state: dict) -> ProjectSpace:
+    project_name = str(chat_state.get("active_project_name", "")).strip()
+    if project_name:
+        return ensure_project_space(project_name)
+    return initial_project_space()
+
+
 @cl.on_chat_start
 async def on_chat_start() -> None:
     cl.user_session.set("last_goal", "")
     cl.user_session.set("last_run", None)
+    chat_state = chat_thread_state()
+    cl.user_session.set("active_chat_id", chat_state["active_id"])
     refresh_advertised_backends(selected_chat_backend(), "")
     try:
         local_node = coordination.heartbeat()
@@ -342,14 +369,15 @@ async def on_chat_start() -> None:
         else:
             await cl.Message(content=f"Coordination error: {exc}").send()
             return
-    project = initial_project_space()
+    project = initial_project_space_for_chat(chat_state)
     cl.user_session.set("project_space", project)
     active = f"`{project.name}`"
     save_preferences({"project_name": project.name})
+    set_chat_thread_project(chat_state["active_id"], project.name)
 
     await setup_chat_settings()
     start_ui_worker()
-    await restore_chat_history()
+    await restore_chat_history(chat_state["active_id"])
     await cl.Message(
         content=(
             f"I'm ready in project space {active}. The dashboard has the machine and connection details "
@@ -370,7 +398,11 @@ async def on_message(message: cl.Message) -> None:
     if project is None:
         await cl.Message(content="Pick a project space first with `/use <name>`.").send()
         return
+    maybe_rename_empty_active_chat(text)
     append_chat("user", "You", text)
+
+    # Normal chat text is always handed to the selected agent/model path.
+    # Dashboard classification and progress are telemetry; slash commands are the control plane.
     cl.user_session.set("last_goal", text)
     selected_backend = normalize_selected_backend(str(cl.user_session.get("agent_backend") or "auto"))
     refresh_advertised_backends(selected_backend, text)
@@ -405,7 +437,7 @@ async def on_message(message: cl.Message) -> None:
         await progress_message.update()
         return
 
-    turn_agent_names = infer_goal_roles(text)
+    turn_agent_names = ["coordinator"]
     turn_orchestrator = Orchestrator(
         build_swarm_client(
             settings,
@@ -418,11 +450,14 @@ async def on_message(message: cl.Message) -> None:
         coordination,
         delegated_task_wait_seconds=settings.delegated_task_wait_seconds,
         delegated_task_ack_seconds=settings.delegated_task_ack_seconds,
+        conversation_context=recent_chat_context(text),
     )
     turns = []
     final_run = None
     async for event in turn_orchestrator.run(text, project):
         if isinstance(event, ProgressUpdate):
+            if should_hide_progress_update(event):
+                continue
             progress_items[progress_key(event)] = progress_line(event)
             progress_message.content = render_progress(progress_items)
             await progress_message.update()
@@ -441,7 +476,7 @@ async def on_message(message: cl.Message) -> None:
 
     if final_run:
         cl.user_session.set("last_run", final_run)
-    progress_message.content = "## Coordination Status\n\n- `ready` Response is ready. Any generated code is listed below; live routing remains in the dashboard."
+    progress_message.content = "## Coordination Status\n\n- `ready` Response is ready. Live routing and artifact details remain in the dashboard."
     await progress_message.update()
     response = conversational_response(final_run, turns)
     append_chat("assistant", "Assistant", response)
@@ -449,15 +484,84 @@ async def on_message(message: cl.Message) -> None:
     await update_cluster_roster()
 
 
+def recent_chat_context(current_message: str, limit: int = 8) -> str:
+    chat_id = str(cl.user_session.get("active_chat_id") or "")
+    records = load_chat_history(limit=limit, chat_id=chat_id or None)
+    if records and records[-1].role == "user" and records[-1].content.strip() == current_message.strip():
+        records = records[:-1]
+    if not records:
+        return ""
+    lines = ["Recent chat before the latest user message:"]
+    for record in records[-limit:]:
+        speaker = "User" if record.role == "user" else "Assistant"
+        content = " ".join(record.content.strip().split())
+        if len(content) > 600:
+            content = f"{content[:597]}..."
+        lines.append(f"{speaker}: {content}")
+    return "\n".join(lines)
+
+
+def parse_preview_port_change(text: str) -> dict[str, int]:
+    lowered = text.lower()
+    if "port" not in lowered and not re.search(r"\b(5173|8000)\b", lowered):
+        return {}
+    if not re.search(r"\b(use|using|swap|switch|change|move|set|try|take|taken|busy|occupied|free|available|instead)\b", lowered):
+        return {}
+
+    ports = [int(match) for match in re.findall(r"\b([1-9]\d{2,4})\b", lowered)]
+    ports = [port for port in ports if 1 <= port <= 65535]
+    if not ports:
+        return {}
+
+    change: dict[str, int] = {}
+    frontend_match = re.search(r"\b(?:front\s*end|frontend|ui|site|preview)\b[^\d]{0,40}([1-9]\d{2,4})\b", lowered)
+    backend_match = re.search(r"\b(?:back\s*end|backend|api|server)\b[^\d]{0,40}([1-9]\d{2,4})\b", lowered)
+    if frontend_match:
+        frontend_port = int(frontend_match.group(1))
+        if 1 <= frontend_port <= 65535:
+            change["frontend_port"] = frontend_port
+    if backend_match:
+        backend_port = int(backend_match.group(1))
+        if 1 <= backend_port <= 65535:
+            change["backend_port"] = backend_port
+
+    if change:
+        return change
+    if "backend" in lowered or "api" in lowered or "server" in lowered:
+        return {"backend_port": ports[-1]}
+    return {"frontend_port": ports[-1]}
+
+
+def apply_preview_port_change(project: ProjectSpace, change: dict[str, int]) -> str:
+    save_project_preview_ports(
+        project,
+        frontend_port=change.get("frontend_port"),
+        backend_port=change.get("backend_port"),
+    )
+    lines = ["### Preview Port Updated", f"Project: `{project.name}`"]
+    if "frontend_port" in change:
+        lines.append(f"Frontend preview now opens at `{preview_frontend_url(project)}`.")
+    if "backend_port" in change:
+        lines.append(f"Backend API health now opens at `{preview_backend_url(project)}`.")
+    lines.extend(
+        [
+            "",
+            "Run the preview with:",
+            "",
+            "```powershell",
+            preview_command(project),
+            "```",
+        ]
+    )
+    return "\n".join(lines)
+
+
 @cl.on_settings_update
 async def on_settings_update(updated_settings: dict) -> None:
     backend = normalize_selected_backend(str(updated_settings.get("agent_backend", "Select")))
     restore_history = bool(updated_settings.get("restore_history", True))
     project_name = slugify_project_name(str(updated_settings.get("project_name", "") or "default"))
-    current_project = cl.user_session.get("project_space")
-    if not current_project or current_project.name != project_name:
-        current_project = ensure_project_space(project_name)
-        cl.user_session.set("project_space", current_project)
+    current_project = activate_project_space(project_name)
     visible_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
     visible_command = clean_command_input(updated_settings.get("codex_command", ""))
     openai_api_key = visible_api_key if backend == CODEX_BACKEND else clean_secret_input(updated_settings.get("openai_api_key", ""))
@@ -503,43 +607,349 @@ async def on_settings_update(updated_settings: dict) -> None:
     )
     await setup_chat_settings(backend)
     await update_cluster_roster()
+    await show_dashboard_sidebar()
 
 
 def conversational_response(run: OrchestrationRun | None, turns: list) -> str:
     goal = run.goal if run else str(cl.user_session.get("last_goal") or "")
-    if is_lightweight_chat(goal):
-        return "Hey, I'm here. Send me what you want the agents to work on, and I'll keep the coordination details in the dashboard."
-
     project = run.project if run else cl.user_session.get("project_space")
-    proof = work_proof_summary(project, getattr(run, "delegated_tasks", None) if run else None)
+    response_tasks = live_response_tasks(run)
+    proof = compact_work_proof(project, response_tasks)
+    should_attach_proof = should_attach_supporting_workspace(goal, run)
 
     if not turns:
-        if proof:
-            return f"I found the project workspace and generated artifacts.\n\n{proof}"
-        return "I'm on it. I could not find generated workspace artifacts yet, so no code proof is available."
+        if proof and should_attach_proof:
+            return f"The selected agent did not return a chat answer, but generated artifacts are available.{supporting_suffix(proof)}"
+        return "The selected agent did not return a chat answer yet, and I could not find generated workspace artifacts."
 
-    preferred_roles = ["engineer", "backend", "frontend", "coordinator", "researcher", "reviewer", "documenter"]
-    chosen = turns[-1]
-    for role in preferred_roles:
-        match = next((turn for turn in turns if role in turn.role.lower() or role == turn.agent.lower()), None)
-        if match:
-            chosen = match
-            break
-
-    content = brief_agent_chat_content(chosen.content)
+    content = best_agent_answer(turns)
+    diagnostic = agent_failure_diagnostic(turns, project)
+    if diagnostic and agent_output_is_failure(content) and not agent_output_has_successful_fallback(turns):
+        content = diagnostic
     if not content:
-        content = "Done."
+        content = diagnostic
+    if not content:
+        content = agent_no_answer_message(project, proof)
 
     if run and run.delegated_tasks:
         if agent_setup_failure(content):
             return routing_response_with_setup_issue(run, content)
         if worker_result_needs_recovery(content):
             return content
-        suffix = f"\n\n{proof}" if proof else "\n\nNo generated files were found in the active workspace yet."
-        return f"{content}{suffix}"
-    if proof:
-        return f"{content}\n\n{proof}"
+        return f"{content}{supporting_suffix(proof) if proof and should_attach_proof else ''}"
+    if proof and should_attach_proof:
+        return f"{content}{supporting_suffix(proof)}"
     return content
+
+
+def should_attach_supporting_workspace(goal: str, run: OrchestrationRun | None) -> bool:
+    lowered = " ".join(str(goal or "").lower().split())
+    explicit_artifact_request = any(
+        marker in lowered
+        for marker in [
+            "where",
+            "code",
+            "workspace",
+            "files",
+            "proof",
+            "preview",
+            "artifact",
+            "generated",
+            "did work",
+            "show me",
+        ]
+    )
+    if explicit_artifact_request:
+        return True
+    if not run:
+        return False
+    return any(task.role != "coordinator" for task in run.delegated_tasks)
+
+
+def best_agent_answer(turns: list) -> str:
+    fallback = successful_agent_fallback_answer(turns)
+    if fallback:
+        return fallback
+    chosen = choose_answer_turn(turns)
+    content = full_agent_chat_content(chosen.content)
+    if answer_is_generic(content):
+        substantive = next(
+            (
+                full_agent_chat_content(turn.content)
+                for turn in reversed(turns)
+                if not answer_is_generic(full_agent_chat_content(turn.content))
+            ),
+            "",
+        )
+        return substantive or content
+    return content
+
+
+def successful_agent_fallback_answer(turns: list) -> str:
+    for turn in reversed(turns):
+        raw = str(getattr(turn, "content", "") or "")
+        lowered = raw.lower()
+        if "api fallback response" not in lowered and "api response" not in lowered:
+            continue
+        clean = full_agent_chat_content(raw)
+        if clean and not agent_output_is_failure(clean):
+            return clean
+    return ""
+
+
+def agent_output_has_successful_fallback(turns: list) -> bool:
+    return bool(successful_agent_fallback_answer(turns))
+
+
+def agent_failure_diagnostic(turns: list, project: ProjectSpace | None = None) -> str:
+    raw = "\n".join(str(getattr(turn, "content", "") or "") for turn in turns)
+    lowered = raw.lower()
+    if not lowered.strip():
+        return ""
+    workspace_line = f"\n\nActive workspace: `{project.path.resolve()}`" if project else ""
+    if "failed to open state db" in lowered or "readonly database" in lowered or "state_db" in lowered:
+        return (
+            "The selected Codex backend started, but Codex failed before it could return a final answer because "
+            "its local state database is not writable from this app process. This is a local Codex session/access "
+            "problem, not a project-layout problem."
+            f"{workspace_line}\n\n"
+            "Fix: save an OpenAI API key in Settings for automatic Codex API fallback, or restart Chat Orchestrate "
+            "from a normal terminal session that can run the same `codex exec` command and write to "
+            f"`{Path.home() / '.codex'}`."
+        )
+    if "failed to initialize in-process app-server client" in lowered:
+        return (
+            "The selected Codex backend launched, but Codex could not initialize its local app-server client. "
+            "The harness did not invent a replacement answer."
+            f"{workspace_line}\n\n"
+            "Fix: open/sign in to Codex normally, then restart Chat Orchestrate from that same working terminal session."
+        )
+    if "claude" in lowered and any(
+        marker in lowered
+        for marker in [
+            "not logged in",
+            "authentication failed",
+            "auth failed",
+            "auth error",
+            "unauthorized",
+            "missing api key",
+            "invalid api key",
+            "no api key",
+            "permission denied",
+            "access is denied",
+        ]
+    ):
+        return (
+            "The selected Claude Code backend started or was selected, but the local Claude session/CLI was not usable "
+            "from this app process. If a Claude API key is saved in Settings, the harness will try that fallback "
+            "automatically; otherwise it will surface the local CLI failure."
+            f"{workspace_line}\n\n"
+            "Fix: sign in through the normal `claude` CLI flow, set the Claude Code command path, or save a Claude "
+            "API key in Settings."
+        )
+    if "gemini" in lowered and any(
+        marker in lowered
+        for marker in [
+            "not logged in",
+            "authentication failed",
+            "auth failed",
+            "auth error",
+            "unauthorized",
+            "missing api key",
+            "invalid api key",
+            "no api key",
+            "permission denied",
+            "access is denied",
+        ]
+    ):
+        return (
+            "The selected Gemini CLI backend started or was selected, but the local Gemini session/CLI was not usable "
+            "from this app process. If a Gemini API key is saved in Settings, the harness will try that fallback "
+            "automatically; otherwise it will surface the local CLI failure."
+            f"{workspace_line}\n\n"
+            "Fix: sign in through the normal `gemini` CLI flow, set the Gemini CLI command path, or save a Gemini "
+            "API key in Settings."
+        )
+    if "exited with code" in lowered and "did not return final chat text" in lowered:
+        return (
+            "The selected local agent exited without returning final chat text. I kept the raw failure details in "
+            "the run output instead of generating fake code."
+            f"{workspace_line}\n\n"
+            "Use `/layout` to confirm where project code should be written, then rerun after the local agent command "
+            "works from a normal terminal."
+        )
+    if "did not receive a usable response" in lowered:
+        return full_agent_chat_content(raw)
+    return ""
+
+
+def agent_output_is_failure(content: str) -> bool:
+    lowered = " ".join(str(content or "").lower().split())
+    return any(
+        marker in lowered
+        for marker in [
+            "failed to open state db",
+            "readonly database",
+            "state_db",
+            "failed to initialize in-process app-server client",
+            "did not return final chat text",
+            "did not receive a usable response",
+            "exited with code",
+            "not logged in",
+            "authentication failed",
+            "auth failed",
+            "auth error",
+            "unauthorized",
+        ]
+    )
+
+
+def agent_no_answer_message(project: ProjectSpace | None, proof: str) -> str:
+    workspace = f"`{project.path.resolve()}`" if project else "the active workspace"
+    if proof:
+        return (
+            "The selected agent did not return chat text, but I found workspace artifacts. "
+            f"Code evidence is under {workspace}."
+        )
+    return (
+        "The selected agent returned no chat text and no new workspace artifacts were found. "
+        f"Active workspace: {workspace}. Use `/layout` for the source/runtime split."
+    )
+
+
+def choose_answer_turn(turns: list):
+    for turn in reversed(turns):
+        content = full_agent_chat_content(turn.content)
+        if content and not answer_is_generic(content):
+            return turn
+    return turns[-1]
+
+
+def full_agent_chat_content(content: str, max_chars: int = 1800) -> str:
+    clean = clean_agent_chat_content(content)
+    if len(clean) <= max_chars:
+        return clean
+    shortened = clean[:max_chars].rsplit("\n", 1)[0].rstrip()
+    return f"{shortened}\n\n..."
+
+
+def answer_is_generic(content: str) -> bool:
+    lowered = " ".join(str(content or "").lower().split())
+    generic_markers = [
+        "coordinator routing is ready",
+        "response is ready",
+        "details are tucked into the dashboard",
+        "reviewed `",
+        "preview fallback wrote workspace code",
+        "done.",
+    ]
+    return not lowered or any(marker in lowered for marker in generic_markers)
+
+
+def workspace_middleman_response(goal: str, project: ProjectSpace | None) -> str:
+    lowered = goal.lower()
+    if project is None:
+        return "I found generated project artifacts, but the active workspace path is not loaded in this chat session."
+    if any(marker in lowered for marker in ["where", "code", "workspace", "files", "did work", "proof"]):
+        return f"The generated code for this run is in `{project.path}`. I’ll keep the exact files and preview command below."
+    return "I’ve got a concrete workspace result for this run. The generated files and preview command are below."
+
+
+def workspace_middleman_response(goal: str, project: ProjectSpace | None) -> str:
+    lowered = goal.lower()
+    if project is None:
+        return "I found generated project artifacts, but the active workspace path is not loaded in this chat session."
+    if any(marker in lowered for marker in ["where", "code", "workspace", "files", "did work", "proof"]):
+        return f"The generated code for this run is in `{project.path}`. I will keep the exact files and preview command below."
+    if looks_like_visual_feedback(lowered):
+        return (
+            f"This is frontend styling feedback. The active app files are in `{project.path / 'frontend'}`; "
+            "the supporting proof below shows what can be previewed."
+        )
+    return "I have a concrete workspace result for this run. The generated files and preview command are below."
+
+
+def looks_like_diagnostic_prompt(lowered_goal: str) -> bool:
+    return any(
+        marker in lowered_goal
+        for marker in [
+            "404",
+            "not found",
+            "error",
+            "warning",
+            "failed",
+            "minor errors",
+            "/api/",
+            "backend health",
+            "doesn't work",
+            "doesnt work",
+            "doesn't look",
+            "doesnt look",
+            "not quite",
+            "color",
+            "colour",
+            "visual",
+            "youtube-y",
+        ]
+    )
+
+
+def looks_like_visual_feedback(lowered_goal: str) -> bool:
+    return any(
+        marker in lowered_goal
+        for marker in [
+            "color",
+            "colour",
+            "colors",
+            "colours",
+            "style",
+            "styling",
+            "visual",
+            "youtube-y",
+            "youtube like",
+            "youtube-like",
+            "not quite youtube",
+            "doesn't seem",
+            "doesnt seem",
+        ]
+    )
+
+
+def compact_work_proof(project: ProjectSpace | None, tasks: object | None = None) -> str:
+    if project is None:
+        return ""
+    artifacts = scan_project_artifacts(project, limit=5)
+    task_list = list(tasks) if tasks and not isinstance(tasks, list) else (tasks or [])
+    evaluation = build_evaluation_summary(project, task_list)
+    lines = [
+        "### Supporting Workspace",
+        f"Workspace: `{project.path}`",
+    ]
+    if artifacts:
+        files = ", ".join(f"`{artifact.relative_path}`" for artifact in artifacts[:5])
+        lines.append(f"Files: {files}")
+        if any(artifact.relative_path == "frontend/index.html" for artifact in artifacts):
+            lines.append(f"Preview: `{preview_command(project)}`")
+    stats = task_completion_stats(task_list)
+    if stats["total"]:
+        lines.append(f"Agent tasks: `{stats['completed']}/{stats['total']}` completed")
+    parts = [part for part in [evaluation, "\n".join(lines)] if part]
+    return "\n\n".join(parts)
+
+
+def live_response_tasks(run: OrchestrationRun | None) -> list[DelegatedTask]:
+    if not run:
+        return []
+    run_id = str(getattr(run, "run_id", "") or "")
+    if run_id:
+        live_tasks = tasks_for_run(dashboard_tasks_snapshot(), run_id)
+        if live_tasks:
+            return live_tasks
+    return list(getattr(run, "delegated_tasks", []) or [])
+
+
+def supporting_suffix(proof: str) -> str:
+    return f"\n\n{proof}" if proof else ""
 
 
 def progress_line(update: ProgressUpdate) -> str:
@@ -554,6 +964,10 @@ def progress_line(update: ProgressUpdate) -> str:
         tags.append(f"`{update.role}`")
     prefix = f"- {' '.join(tags)} " if tags else "- "
     return prefix + update.message
+
+
+def should_hide_progress_update(update: ProgressUpdate) -> bool:
+    return update.phase == "agent-warning" and is_benign_agent_stderr(update.message)
 
 
 async def run_status_call(
@@ -592,13 +1006,20 @@ def progress_key(update: ProgressUpdate) -> str:
         machine = update.assigned_machine or "local"
         role = update.role or "agent"
         backend = update.preferred_backend or "backend"
-        fingerprint = abs(hash((update.phase, machine, role, backend, update.message)))
-        return f"stream:{machine}:{role}:{backend}:{update.elapsed_seconds}:{fingerprint}"
+        fingerprint = abs(hash((update.phase, machine, role, backend, progress_message_fingerprint(update.message))))
+        return f"stream:{machine}:{role}:{backend}:{fingerprint}"
     if update.task_id:
         return f"task:{update.task_id}"
     if update.role:
         return f"role:{update.role}"
     return f"phase:{update.phase}"
+
+
+def progress_message_fingerprint(message: str) -> str:
+    clean = " ".join(str(message or "").split())
+    clean = re.sub(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b", "<time>", clean)
+    clean = re.sub(r"\bElapsed: \d+s\.", "Elapsed: <n>s.", clean)
+    return clean
 
 
 def render_progress(items: dict[str, str]) -> str:
@@ -666,10 +1087,16 @@ def clean_agent_chat_content(content: str) -> str:
     skip_next_blank = False
     for line in content.splitlines():
         clean = line.strip()
-        if re.fullmatch(r"`[^`]+`\s+local response", clean):
+        if is_noisy_agent_output_line(clean):
+            skip_next_blank = False
+            continue
+        if re.fullmatch(r"`[^`]+`\s+local response", clean, flags=re.IGNORECASE):
             skip_next_blank = True
             continue
-        if re.fullmatch(r"`[^`]+`\s+result from\s+`[^`]+`", clean):
+        if re.fullmatch(r"`[^`]+`\s+api(?: fallback)? response", clean, flags=re.IGNORECASE):
+            skip_next_blank = True
+            continue
+        if re.fullmatch(r"`[^`]+`\s+result from\s+`[^`]+`", clean, flags=re.IGNORECASE):
             skip_next_blank = True
             continue
         if skip_next_blank and not clean:
@@ -680,6 +1107,20 @@ def clean_agent_chat_content(content: str) -> str:
     return "\n".join(lines).strip()
 
 
+def is_noisy_agent_output_line(line: str) -> bool:
+    lowered = str(line or "").lower()
+    return (
+        "warning: could not open directory '.pytest-tmp" in lowered
+        or "warning: could not open directory \".pytest-tmp" in lowered
+        or "codex_core::shell_snapshot" in lowered
+        or "codex_core_skills::loader: ignoring interface.icon_" in lowered
+        or "failed to clean up stale arg0 temp dirs" in lowered
+        or "proceeding, even though we could not update path" in lowered
+        or "\\.codex\\tmp\\arg0\\" in lowered
+        or ("tcp " in lowered and "time_wait" in lowered)
+    )
+
+
 async def handle_command(text: str) -> None:
     parts = text.split()
     command = parts[0].lower()
@@ -687,6 +1128,12 @@ async def handle_command(text: str) -> None:
     try:
         if command == "/dashboard":
             await show_dashboard_sidebar()
+        elif command == "/chats":
+            await show_chats()
+        elif command == "/new-chat":
+            await start_new_chat()
+        elif command == "/archive-chat":
+            await archive_active_chat()
         elif command == "/help":
             await cl.Message(content=command_help(), actions=machine_actions()).send()
         elif command == "/detect-agents":
@@ -726,6 +1173,8 @@ async def handle_command(text: str) -> None:
             await show_workspace_modes()
         elif command == "/artifacts":
             await show_artifacts()
+        elif command == "/layout":
+            await show_layout()
         elif command == "/machines":
             coordination.heartbeat()
             await show_machines()
@@ -756,7 +1205,8 @@ async def handle_command(text: str) -> None:
             await end_session()
         elif command == "/clear-history":
             clear_chat_history()
-            await cl.Message(content="Local restored chat history cleared.").send()
+            await cl.Message(content="Cleared the saved history for the active local chat.").send()
+            await show_dashboard_sidebar()
         else:
             await cl.Message(content=command_help()).send()
     except ProjectSpaceError as exc:
@@ -780,6 +1230,33 @@ async def show_spaces() -> None:
     await cl.Message(content="## Project Spaces\n\n" + "\n".join(lines)).send()
 
 
+def activate_project_space(project_name: str, bind_to_active_chat: bool = True) -> ProjectSpace:
+    project = ensure_project_space(project_name)
+    cl.user_session.set("project_space", project)
+    save_preferences({"project_name": project.name})
+    if bind_to_active_chat:
+        chat_state = chat_thread_state()
+        active_id = str(chat_state.get("active_id", ""))
+        if active_id:
+            set_chat_thread_project(active_id, project.name)
+    return project
+
+
+def reset_chat_task_context() -> None:
+    cl.user_session.set("last_goal", "")
+    cl.user_session.set("last_run", None)
+    refresh_advertised_backends(selected_chat_backend(), "")
+
+
+def unique_new_chat_project_name() -> str:
+    existing = {space.name for space in spaces.list_spaces()}
+    for _ in range(12):
+        name = f"chat-{secrets.token_hex(2)}"
+        if name not in existing:
+            return name
+    return f"chat-{secrets.token_hex(4)}"
+
+
 async def set_project_space() -> None:
     current = cl.user_session.get("project_space")
     default_name = current.name if current else slugify_project_name(load_preferences().get("project_name", "default"))
@@ -790,9 +1267,7 @@ async def set_project_space() -> None:
     if project_name is None:
         return
 
-    project = ensure_project_space(project_name)
-    cl.user_session.set("project_space", project)
-    save_preferences({"project_name": project.name})
+    project = activate_project_space(project_name)
     await setup_chat_settings()
     await cl.Message(
         content=(
@@ -802,6 +1277,106 @@ async def set_project_space() -> None:
             "Agents will use this workspace for generated files, previews, and handoffs."
         )
     ).send()
+    await show_dashboard_sidebar()
+
+
+async def save_project_space_from_action(project_name: str, silent: bool = False) -> None:
+    if not project_name.strip():
+        if not silent:
+            await cl.Message(content="Project space name cannot be empty.").send()
+        await show_dashboard_sidebar()
+        return
+    project = activate_project_space(project_name)
+    await setup_chat_settings()
+    if not silent:
+        await cl.Message(
+            content=(
+                "## Project Space Saved\n\n"
+                f"Active project: `{project.name}`\n\n"
+                f"Writable folder: `{project.path}`"
+            )
+        ).send()
+    await show_dashboard_sidebar()
+
+
+async def show_chats() -> None:
+    state = chat_thread_state()
+    threads = state.get("threads", [])
+    if not threads:
+        await cl.Message(content="No saved local chats yet.").send()
+        return
+    lines = []
+    active_id = state.get("active_id", "")
+    for thread in threads:
+        marker = "active" if thread["id"] == active_id else "saved"
+        preview = f" - {thread['preview']}" if thread.get("preview") else ""
+        lines.append(
+            f"- `{marker}` `{thread['message_count']} msg` **{thread['title']}**{preview}"
+        )
+    archived_count = int(state.get("archived_count") or 0)
+    archived = f"\n\nArchived chats: `{archived_count}`" if archived_count else ""
+    await cl.Message(content="## Local Chats\n\n" + "\n".join(lines) + archived).send()
+    await show_dashboard_sidebar()
+
+
+async def start_new_chat() -> None:
+    project_name = unique_new_chat_project_name()
+    thread = create_chat_thread(project_name=project_name)
+    project = activate_project_space(thread.project_name or project_name)
+    cl.user_session.set("active_chat_id", thread.id)
+    reset_chat_task_context()
+    await setup_chat_settings()
+    await cl.Message(
+        content=(
+            f"Started `{thread.title}`. New messages will be saved to this chat, "
+            f"using fresh project space `{project.name}`."
+        )
+    ).send()
+    await show_dashboard_sidebar()
+
+
+async def start_new_chat_silently() -> None:
+    project_name = unique_new_chat_project_name()
+    thread = create_chat_thread(project_name=project_name)
+    activate_project_space(thread.project_name or project_name)
+    cl.user_session.set("active_chat_id", thread.id)
+    reset_chat_task_context()
+    await setup_chat_settings()
+    await show_dashboard_sidebar()
+
+
+async def switch_chat(chat_id: str, silent: bool = False) -> None:
+    thread = set_active_chat_thread(chat_id)
+    if thread is None:
+        if not silent:
+            await cl.Message(content="I could not find that saved chat, or it has been archived.").send()
+        await show_dashboard_sidebar()
+        return
+    cl.user_session.set("active_chat_id", thread.id)
+    if thread.project_name:
+        activate_project_space(thread.project_name)
+    reset_chat_task_context()
+    await setup_chat_settings()
+    if not silent:
+        await cl.Message(content=f"Switched to `{thread.title}`. Recent saved messages are below.").send()
+        await restore_chat_history(thread.id, force=True)
+    await show_dashboard_sidebar()
+
+
+async def archive_active_chat(chat_id: str | None = None, silent: bool = False) -> None:
+    archived = archive_chat_thread(chat_id)
+    state = chat_thread_state()
+    cl.user_session.set("active_chat_id", state["active_id"])
+    if state.get("active_project_name"):
+        activate_project_space(str(state["active_project_name"]))
+    reset_chat_task_context()
+    await setup_chat_settings()
+    if not silent:
+        await cl.Message(
+            content=(
+                f"Archived `{archived.title}`. Active chat is now `{state['active_title']}`."
+            )
+        ).send()
     await show_dashboard_sidebar()
 
 
@@ -815,9 +1390,9 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
     claude_credentials = credentials.get(CLAUDE_CODE_BACKEND, {})
     gemini_credentials = credentials.get(GEMINI_CLI_BACKEND, {})
     openswarm_credentials = credentials.get(OPEN_SWARM_BACKEND, {})
-    openai_api_key = clean_secret_input(codex_credentials.get("openai_api_key", ""))
-    claude_api_key = clean_secret_input(claude_credentials.get("claude_api_key", ""))
-    gemini_api_key = clean_secret_input(gemini_credentials.get("gemini_api_key", ""))
+    openai_api_key = clean_secret_input(codex_credentials.get("openai_api_key", "")) or settings.openai_api_key.strip()
+    claude_api_key = clean_secret_input(claude_credentials.get("claude_api_key", "")) or settings.claude_api_key.strip()
+    gemini_api_key = clean_secret_input(gemini_credentials.get("gemini_api_key", "")) or settings.gemini_api_key.strip()
     codex_command = validated_command_preference(
         CODEX_BACKEND,
         clean_command_input(codex_credentials.get("codex_command", preferences.get("codex_command", settings.codex_command))),
@@ -1050,6 +1625,8 @@ def backend_is_callable_with_overrides(backend: str, command_overrides: dict[str
         return True
     if backend == CODEX_BACKEND and load_openai_api_key():
         return True
+    if backend in {CLAUDE_CODE_BACKEND, GEMINI_CLI_BACKEND} and load_agent_api_keys().get(backend, ""):
+        return True
     if backend == OPEN_SWARM_BACKEND:
         return bool(settings.open_swarm_base_url.strip())
     return False
@@ -1087,14 +1664,16 @@ def backend_setup_needed_cards(backend: str) -> str:
             "## Claude Code Is Selected, But Not Connected For Headless Runs\n\n"
             "This harness talks to Claude Code through the local `claude` command. Sign in through Claude "
             "Code's normal terminal flow, make sure `claude` is on `PATH`, or set the full command path in "
-            "the sidebar. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
+            "the sidebar. You can also save a Claude API key in Settings for API fallback when the local "
+            "CLI is not available. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
         )
     if backend == GEMINI_CLI_BACKEND:
         return (
             "## Gemini CLI Is Selected, But Not Connected For Headless Runs\n\n"
             "This harness talks to Gemini through the local `gemini` command. Sign in through Gemini CLI's "
             "normal terminal flow, make sure `gemini` is on `PATH`, or set the full command path in the "
-            "sidebar. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
+            "sidebar. You can also save a Gemini API key in Settings for API fallback when the local CLI is "
+            "not available. Use **Auto-detect Agents** after setup, or **Restart App** if PATH changed."
         )
     return f"## `{backend}` Is Not Ready\n\n{backend_execution_hint(backend)}"
 
@@ -1320,10 +1899,12 @@ def load_agent_api_keys() -> dict[str, str]:
         or settings.openai_api_key.strip(),
         CLAUDE_CODE_BACKEND: clean_secret_input(claude_key)
         or clean_secret_input(claude_credentials.get("claude_api_key", ""))
+        or settings.claude_api_key.strip()
         or os.environ.get("ANTHROPIC_API_KEY", "").strip()
         or os.environ.get("CLAUDE_API_KEY", "").strip(),
         GEMINI_CLI_BACKEND: clean_secret_input(gemini_key)
         or clean_secret_input(gemini_credentials.get("gemini_api_key", ""))
+        or settings.gemini_api_key.strip()
         or os.environ.get("GEMINI_API_KEY", "").strip()
         or os.environ.get("GOOGLE_API_KEY", "").strip(),
     }
@@ -1345,12 +1926,12 @@ def clean_secret_input(value: object) -> str:
     return "" if clean.lower() in {"none", "null", "undefined"} else clean
 
 
-async def restore_chat_history() -> None:
-    if not cl.user_session.get("restore_history", True):
+async def restore_chat_history(chat_id: str | None = None, force: bool = False) -> None:
+    if not force and not cl.user_session.get("restore_history", True):
         return
     history = [
         record
-        for record in load_chat_history()
+        for record in load_chat_history(chat_id=chat_id)
         if record.role == "user" or record.author.lower() == "assistant"
     ]
     if not history:
@@ -1391,6 +1972,11 @@ async def show_tasks() -> None:
 async def show_artifacts() -> None:
     project = cl.user_session.get("project_space")
     await cl.Message(content=artifacts_markdown(project), actions=machine_actions()).send()
+
+
+async def show_layout() -> None:
+    project = cl.user_session.get("project_space")
+    await cl.Message(content=workspace_layout_markdown(project), actions=machine_actions()).send()
     await show_dashboard_sidebar()
 
 
@@ -1678,6 +2264,46 @@ async def refresh_dashboard(_: cl.Action) -> None:
         LOGGER.exception("dashboard refresh failed")
 
 
+@cl.action_callback("new_chat")
+async def new_chat_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    if payload.get("silent"):
+        await start_new_chat_silently()
+    else:
+        await start_new_chat()
+
+
+@cl.action_callback("switch_chat")
+async def switch_chat_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    chat_id = str(payload.get("chat_id", "")).strip()
+    if not chat_id:
+        await cl.Message(content="No chat was selected.").send()
+        return
+    await switch_chat(chat_id, silent=bool(payload.get("silent")))
+
+
+@cl.action_callback("archive_chat")
+async def archive_chat_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    chat_id = str(payload.get("chat_id", "")).strip() or None
+    await archive_active_chat(chat_id, silent=bool(payload.get("silent")))
+
+
+@cl.action_callback("restore_chat")
+async def restore_chat_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    chat_id = str(payload.get("chat_id", "")).strip() or str(cl.user_session.get("active_chat_id") or "")
+    await restore_chat_history(chat_id, force=True)
+
+
+@cl.action_callback("save_project_space")
+async def save_project_space_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    project_name = str(payload.get("project_name", "")).strip()
+    await save_project_space_from_action(project_name, silent=bool(payload.get("silent")))
+
+
 @cl.action_callback("claim_orchestrator")
 async def claim_orchestrator(_: cl.Action) -> None:
     node = coordination.claim_orchestrator()
@@ -1769,7 +2395,13 @@ async def end_host_action(_: cl.Action) -> None:
 @cl.action_callback("clear_history")
 async def clear_history_action(_: cl.Action) -> None:
     clear_chat_history()
-    await cl.Message(content="Local restored chat history cleared.").send()
+    await cl.Message(content="Cleared the saved history for the active local chat.").send()
+    await show_dashboard_sidebar()
+
+
+def action_payload(action: cl.Action) -> dict:
+    payload = getattr(action, "payload", None)
+    return payload if isinstance(payload, dict) else {}
 
 
 def machine_actions() -> list[cl.Action]:
@@ -1954,7 +2586,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     project = cl.user_session.get("project_space")
     last_goal = str(cl.user_session.get("last_goal") or "")
     tasks_snapshot = dashboard_tasks_snapshot()
-    current_run_id = current_dashboard_run_id(tasks_snapshot)
+    current_run_id = current_dashboard_run_id(tasks_snapshot, last_goal)
     current_tasks = tasks_for_run(tasks_snapshot, current_run_id)
     artifacts = scan_project_artifacts(project)
     selected_backend = selected_chat_backend()
@@ -1991,7 +2623,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "host_port": host_port,
             "coordinator_url": coordination.http_url or settings.coordination_http_url,
             "host_urls": coordinator_urls,
-            "last_refreshed": datetime.now(UTC).strftime("%H:%M:%S"),
+            "last_refreshed": local_time_label(),
             "token_set": bool(settings.coordination_token),
             "a2a_enabled": hosting_live or connected_to_http,
             "a2a_version": A2A_PROTOCOL_VERSION,
@@ -2009,7 +2641,7 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "selected_backend": selected_backend,
             "selected_ready": selected_ready,
             "capabilities": local_capabilities,
-            "goal_roles": infer_goal_roles(last_goal) if last_goal else [],
+            "goal_roles": [task.role for task in current_tasks],
             "last_goal": last_goal,
         },
         "repo": {
@@ -2017,21 +2649,30 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "code_path": str(project.path) if project else str(settings.workspaces_root / "default"),
             "preview_command": preview_command(project),
             "artifacts": [artifact.__dict__ for artifact in artifacts],
+            "evaluation": build_evaluation(project, current_tasks),
             "worker_outputs": repo_worker_outputs(current_tasks),
             "canonical": "waiting for workspace decision",
             "merge": "waiting for worker outputs",
         },
         "run": dashboard_run_props(tasks_snapshot, current_run_id),
         "machines": [machine_dashboard_props(machine, tasks_snapshot, current_run_id) for machine in machines],
+        "chats": chat_thread_state(),
     }
 
 
-def current_dashboard_run_id(tasks_snapshot: list[DelegatedTask] | None = None) -> str:
+def local_time_label() -> str:
+    """Return a compact timestamp in this machine's local timezone for UI display."""
+    return datetime.now().astimezone().strftime("%H:%M:%S")
+
+
+def current_dashboard_run_id(tasks_snapshot: list[DelegatedTask] | None = None, last_goal: str = "") -> str:
     run = cl.user_session.get("last_run")
     if run and getattr(run, "run_id", ""):
         return str(getattr(run, "run_id", ""))
+    if not last_goal.strip():
+        return ""
     for task in tasks_snapshot or []:
-        if task.run_id:
+        if task.run_id and task.goal == last_goal:
             return task.run_id
     return ""
 
@@ -2040,7 +2681,7 @@ def tasks_for_run(tasks: list[DelegatedTask] | None, run_id: str) -> list[Delega
     if not tasks:
         return []
     if not run_id:
-        return list(tasks)
+        return []
     return [task for task in tasks if task.run_id == run_id]
 
 
@@ -2084,10 +2725,20 @@ def dashboard_run_props(
     current_run_id: str = "",
 ) -> dict:
     run = cl.user_session.get("last_run")
+    last_goal = str(cl.user_session.get("last_goal") or "")
     if not run:
+        if not last_goal.strip() and not current_run_id:
+            return {
+                "run_id": "",
+                "goal": "",
+                "goal_summary": "",
+                "orchestrator_machine": "",
+                "turns": [],
+                "tasks": [],
+                "task_stats": task_completion_stats([]),
+            }
         tasks = recent_dashboard_tasks(current_run_id, tasks_snapshot)
-        latest = (tasks_snapshot or [None])[0]
-        goal = latest.goal if latest else ""
+        goal = last_goal
         current_tasks = tasks_for_run(tasks_snapshot, current_run_id)
         return {
             "run_id": current_run_id,
@@ -2096,11 +2747,13 @@ def dashboard_run_props(
             "orchestrator_machine": "",
             "turns": [],
             "tasks": tasks,
+            "task_stats": task_completion_stats(current_tasks),
         }
     run_id = getattr(run, "run_id", "") or current_run_id
     tasks = recent_dashboard_tasks(run_id, tasks_snapshot)
     goal = getattr(run, "goal", "")
-    run_tasks = getattr(run, "delegated_tasks", []) or tasks_for_run(tasks_snapshot, run_id)
+    live_run_tasks = tasks_for_run(tasks_snapshot, run_id)
+    run_tasks = live_run_tasks or getattr(run, "delegated_tasks", [])
     return {
         "run_id": run_id,
         "goal": goal,
@@ -2117,16 +2770,18 @@ def dashboard_run_props(
             for turn in getattr(run, "turns", [])[-6:]
         ],
         "tasks": tasks,
+        "task_stats": task_completion_stats(run_tasks),
     }
 
 
 def recent_dashboard_tasks(run_id: str, tasks_snapshot: list[DelegatedTask] | None = None) -> list[dict]:
+    if not run_id:
+        return []
     try:
         tasks = tasks_snapshot if tasks_snapshot is not None else coordination.list_tasks()
     except CoordinationError:
         return []
-    if run_id:
-        tasks = [task for task in tasks if task.run_id == run_id]
+    tasks = [task for task in tasks if task.run_id == run_id]
     return [task_dashboard_props(task) for task in list(reversed(tasks[:8]))]
 
 
@@ -2292,6 +2947,14 @@ def selected_chat_backend() -> str:
     return normalize_selected_backend(load_preferences().get("agent_backend", "auto"))
 
 
+def maybe_rename_empty_active_chat(goal: str) -> None:
+    state = chat_thread_state()
+    active_id = str(state.get("active_id", ""))
+    active = next((thread for thread in state.get("threads", []) if thread.get("id") == active_id), None)
+    if active and int(active.get("message_count") or 0) == 0:
+        rename_chat_thread(active_id, summarize_goal(goal, max_length=52))
+
+
 def _format_machine_card(machine, orchestrator_id: str) -> str:
     age = datetime.now(UTC) - machine.last_seen
     seen_seconds = max(0, int(age.total_seconds()))
@@ -2317,6 +2980,9 @@ def command_help() -> str:
     return (
         "## Commands\n\n"
         "- `/dashboard`\n"
+        "- `/chats`\n"
+        "- `/new-chat`\n"
+        "- `/archive-chat`\n"
         "- `/help`\n"
         "- `/detect-agents`\n"
         "- `/restart-app`\n"
@@ -2328,6 +2994,7 @@ def command_help() -> str:
         "- `/clone <name> <git-url> [branch]`\n"
         "- `/workspace-modes`\n"
         "- `/artifacts`\n"
+        "- `/layout`\n"
         "- `/machines`\n"
         "- `/claim-orchestrator`\n"
         "- `/release-orchestrator`\n"

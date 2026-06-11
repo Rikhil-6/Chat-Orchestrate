@@ -69,10 +69,12 @@ class Orchestrator:
         delegated_task_wait_seconds: float = 30.0,
         progress_interval_seconds: float = 3.0,
         delegated_task_ack_seconds: float = 6.0,
+        conversation_context: str = "",
     ) -> None:
         self.client = client
         self.agents = [AGENT_LIBRARY[name] for name in agent_names if name in AGENT_LIBRARY]
         self.coordination = coordination
+        self.conversation_context = conversation_context.strip()
         self.delegated_task_wait_seconds = delegated_task_wait_seconds
         self.progress_interval_seconds = progress_interval_seconds
         self.delegated_task_ack_seconds = (
@@ -100,7 +102,7 @@ class Orchestrator:
             )
             orchestrator_node = self.coordination.get_or_elect_orchestrator()
             run.orchestrator_machine = orchestrator_node.machine_id
-            roles = infer_goal_roles(goal)
+            fallback_roles = infer_goal_roles(goal)
             yield ProgressUpdate(
                 message="Asking the coordinator agent to reason over the machine roster before assigning roles.",
                 phase="routing",
@@ -108,8 +110,13 @@ class Orchestrator:
                 assigned_machine=orchestrator_node.machine_id,
             )
             machines = self.coordination.list_machines()
-            machine_preferences, planned_roles = await self._reasoned_machine_preferences(goal, project, roles, machines)
-            roles = planned_roles or roles
+            machine_preferences, planned_roles = await self._reasoned_machine_preferences(
+                goal,
+                project,
+                fallback_roles,
+                machines,
+            )
+            roles = planned_roles or fallback_roles
             run.delegated_tasks = self.coordination.plan_delegation(
                 run.run_id,
                 project,
@@ -126,7 +133,7 @@ class Orchestrator:
                 assigned_machine=orchestrator_node.machine_id,
             )
 
-        context = ""
+        context = self.conversation_context
 
         for batch in self._execution_batches(self.agents):
             batch_context = f"{delegation_context}\n\n{context}".strip()
@@ -174,7 +181,7 @@ class Orchestrator:
     ) -> AsyncIterator[ProgressUpdate | AgentTurn]:
         task = self._task_for_role(run, self._agent_key(agent))
         yield self._agent_start_progress(agent, task, run)
-        if self._agent_key(agent) == "coordinator" and run.delegated_tasks:
+        if self._agent_key(agent) == "coordinator" and self._has_non_coordinator_tasks(run):
             output = self._fast_coordinator_result(run)
             await self._complete_local_task(task, output)
             yield ProgressUpdate(
@@ -208,6 +215,9 @@ class Orchestrator:
             assigned_machine=self._assigned_machine_for_role(run, self._agent_key(agent)),
             preferred_backend=self._preferred_backend_for_role(run, self._agent_key(agent)),
         )
+
+    def _has_non_coordinator_tasks(self, run: OrchestrationRun) -> bool:
+        return any(task.role != "coordinator" for task in run.delegated_tasks)
 
     async def _complete_local_task(self, task: DelegatedTask | None, output: str) -> None:
         if task is None or self.coordination is None:
@@ -288,7 +298,7 @@ class Orchestrator:
         roles: list[str],
         machines: list[MachineNode],
     ) -> tuple[dict[str, str], list[str]]:
-        if not machines or not roles:
+        if not machines:
             return {}, roles
         machine_payload = [
             {
@@ -308,7 +318,7 @@ class Orchestrator:
             "Schema: {\"roles\":[\"coordinator\",\"backend\"],"
             "\"assignments\":[{\"role\":\"backend\",\"machine_id\":\"exact-live-machine-id\",\"reason\":\"short reason\"}]}\n\n"
             "Rules:\n"
-            "- Infer the roles needed from the user's intent; use only these allowed role names: "
+            "- You, the coordinator agent, must infer the roles needed from the user's intent; use only these allowed role names: "
             "coordinator, researcher, engineer, backend, frontend, reviewer, documenter.\n"
             "- Always include coordinator plus any concrete work roles needed.\n"
             "- Do named-entity and coreference resolution over the whole goal: resolve hostnames, shortened "
@@ -321,7 +331,8 @@ class Orchestrator:
             "- Never invent a machine_id.\n\n"
             f"Project: {project.name}\n"
             f"Goal: {goal}\n"
-            f"Roles: {json.dumps(roles)}\n"
+            f"Recent conversation context:\n{self.conversation_context or 'No prior chat context.'}\n"
+            f"Fallback role hints from the harness, only if useful and possibly incomplete: {json.dumps(roles)}\n"
             f"Roster: {json.dumps(machine_payload)}"
         )
         try:
@@ -347,8 +358,15 @@ class Orchestrator:
             for role in payload.get("roles", [])
             if str(role).strip().lower() in allowed_roles
         ]
+        suppress_generic_engineer = (
+            "engineer" not in fallback_roles
+            and any(role in {*planned_roles, *fallback_roles} for role in {"backend", "frontend"})
+        )
+        if "engineer" in planned_roles and suppress_generic_engineer:
+            planned_roles = [role for role in planned_roles if role != "engineer"]
         if not isinstance(assignments, list):
-            return preferences, self._unique_roles([*planned_roles, *fallback_roles])
+            model_roles = self._unique_roles(["coordinator", *planned_roles])
+            return preferences, model_roles if len(model_roles) > 1 else list(fallback_roles)
         for item in assignments:
             if not isinstance(item, dict):
                 continue
@@ -363,6 +381,8 @@ class Orchestrator:
             ).strip()
             if role not in allowed_roles:
                 continue
+            if role == "engineer" and suppress_generic_engineer:
+                continue
             if not machine_id and item.get("is_this_machine") and self.coordination is not None:
                 machine_id = self.coordination.machine_id
             exact_machine = self._resolve_machine_reference(machine_id, machines)
@@ -371,7 +391,8 @@ class Orchestrator:
             if exact_machine:
                 preferences[role] = exact_machine
                 planned_roles.append(role)
-        return preferences, self._unique_roles(["coordinator", *planned_roles, *fallback_roles])
+        model_roles = self._unique_roles(["coordinator", *planned_roles])
+        return preferences, model_roles if len(model_roles) > 1 else list(fallback_roles)
 
     def _resolve_machine_reference(self, reference: str, machines: list[MachineNode]) -> str:
         clean = str(reference or "").strip()

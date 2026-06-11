@@ -1,17 +1,31 @@
+# Local environment
 .env
 .venv/
+*.egg-info/
+
+# Python/tool caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-tmp/
 .ruff_cache/
+pytest-cache-files-*/
+
+# Chainlit/user runtime
 .chainlit/translations/
 .files/
 .tmp/
-pytest-cache-files-*/
+tmp/
+space_smoke_root/
+
+# Generated project output belongs under workspaces/, not repo source.
+frontend/
 workspaces/
+
+# Local coordination/session state
 workspace_state.json
 coordination_state.json
+coordination_state.json.*.tmp
 coordination_state.corrupt-*.json
 runtime_config.json
 ui_state.json
-*.egg-info/

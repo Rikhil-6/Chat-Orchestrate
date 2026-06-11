@@ -41,7 +41,7 @@ def main() -> None:
     target = str(Path(args.target))
     check_file(target)
 
-    config.run.host = args.host
+    config.run.host = display_host(args.host)
     config.run.port = args.port
     config.run.module_name = target
 
@@ -73,6 +73,12 @@ async def serve(host: str, port: int) -> None:
     start_q_listener(lambda: setattr(server, "should_exit", True))
     print("Press q then Enter, or Ctrl-C, to stop.")
     await server.serve()
+
+
+def display_host(bind_host: str) -> str:
+    if bind_host in {"0.0.0.0", "::", "127.0.0.1", "::1"}:
+        return "localhost"
+    return bind_host
 
 
 def assert_app_callbacks() -> None:

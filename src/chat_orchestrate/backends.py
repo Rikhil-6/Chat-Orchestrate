@@ -7,9 +7,13 @@ import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 
+from .api_harness import apply_api_harness_response, build_api_harness_prompt
+from .models import ProjectSpace
 from .models import DelegatedTask
 
 
@@ -18,6 +22,75 @@ CODEX_BACKEND = "codex"
 CLAUDE_CODE_BACKEND = "claude-code"
 GEMINI_CLI_BACKEND = "gemini-cli"
 OPEN_SWARM_BACKEND = "openswarm"
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "GIT_HTTP_PROXY",
+    "GIT_HTTPS_PROXY",
+)
+BACKEND_RUNTIME_FAILURE_MARKERS = {
+    CODEX_BACKEND: (
+        "failed to open state db",
+        "readonly database",
+        "codex_rollout::state_db",
+        "failed to initialize state runtime",
+        "failed to initialize in-process app-server client",
+        "not logged in",
+        "authentication failed",
+        "auth failed",
+        "auth error",
+        "unauthorized",
+        "api key missing",
+        "missing api key",
+        "invalid api key",
+        "no api key",
+        "permission denied",
+        "access is denied",
+        "did not return final chat text",
+        "did not receive a usable response",
+    ),
+    CLAUDE_CODE_BACKEND: (
+        "claude code command",
+        "claude command",
+        "not logged in",
+        "authentication failed",
+        "auth failed",
+        "auth error",
+        "unauthorized",
+        "api key missing",
+        "missing api key",
+        "invalid api key",
+        "no api key",
+        "anthropic_api_key",
+        "claude_api_key",
+        "permission denied",
+        "access is denied",
+        "did not return final chat text",
+        "did not receive a usable response",
+    ),
+    GEMINI_CLI_BACKEND: (
+        "gemini command",
+        "not logged in",
+        "authentication failed",
+        "auth failed",
+        "auth error",
+        "unauthorized",
+        "api key missing",
+        "missing api key",
+        "invalid api key",
+        "no api key",
+        "gemini_api_key",
+        "google_api_key",
+        "permission denied",
+        "access is denied",
+        "did not return final chat text",
+        "did not receive a usable response",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -72,8 +145,17 @@ def run_task(
     command_overrides: dict[str, str] | None = None,
     openai_api_key: str = "",
     codex_api_model: str = "gpt-5.3-codex",
+    api_keys: dict[str, str] | None = None,
+    claude_api_model: str = "claude-sonnet-4-5",
+    gemini_api_model: str = "gemini-2.0-flash",
     workspaces_root: Path | None = None,
 ) -> str:
+    api_keys = _normalized_api_keys(api_keys, openai_api_key)
+    api_models = {
+        CODEX_BACKEND: codex_api_model,
+        CLAUDE_CODE_BACKEND: claude_api_model,
+        GEMINI_CLI_BACKEND: gemini_api_model,
+    }
     if dry_run or task.preferred_backend == SIMULATED_BACKEND:
         return (
             f"{task.preferred_backend} worker completed a preview pass for `{task.role}`.\n\n"
@@ -85,8 +167,21 @@ def run_task(
 
     command = command_for_backend(task.preferred_backend, command_overrides)
     if command is None:
-        if task.preferred_backend == CODEX_BACKEND and openai_api_key.strip():
-            return run_codex_api_task(task, openai_api_key.strip(), codex_api_model)
+        api_key = api_keys.get(task.preferred_backend, "")
+        if api_key and backend_supports_api_fallback(task.preferred_backend):
+            workspace_path = task_workspace_path(task, workspaces_root)
+            api_output = run_backend_api_task(
+                task,
+                task.preferred_backend,
+                api_key,
+                api_models[task.preferred_backend],
+                workspace_path,
+            )
+            return (
+                f"Backend `{task.preferred_backend}` is not executable on this machine, so this worker "
+                f"used the configured {backend_api_name(task.preferred_backend)} API fallback automatically.\n\n"
+                f"{api_output}"
+            )
         return (
             f"Backend `{task.preferred_backend}` is not executable on this machine.\n\n"
             f"{backend_execution_hint(task.preferred_backend)}"
@@ -110,24 +205,64 @@ def run_task(
         f"{workspace_line}"
         f"{write_contract}"
         f"Goal:\n{task.goal}\n\n"
+        "Response contract:\n"
+        "- Answer the user's latest request directly first, in normal assistant prose.\n"
+        "- Then include exact files changed, preview/verification commands, diagnostics, or blockers as needed.\n"
+        "- Do not lead with generic coordination status or proof sections unless that is the answer.\n\n"
         "Return a concrete, useful result for your assigned role. If this is implementation work, describe "
         "the exact files, commands, or code changes you would make or have made."
     )
 
-    args = task_command_args(task.preferred_backend, command, prompt, workspace_path)
+    final_output_path = codex_final_message_path(workspace_path) if task.preferred_backend == CODEX_BACKEND else None
+    args = task_command_args(task.preferred_backend, command, prompt, workspace_path, final_output_path)
     if args is None:
         return f"Backend `{task.preferred_backend}` has no command runner yet."
 
-    result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=180, cwd=workspace_path)
-    output = result.stdout.strip() or result.stderr.strip()
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+        cwd=workspace_path,
+        stdin=subprocess.DEVNULL,
+        env=backend_process_env(api_keys),
+    )
+    output = read_text_if_present(final_output_path) or result.stdout.strip() or result.stderr.strip()
+    if (
+        is_backend_runtime_failure(task.preferred_backend, output)
+        and api_keys.get(task.preferred_backend, "")
+        and backend_supports_api_fallback(task.preferred_backend)
+    ):
+        api_output = run_backend_api_task(
+            task,
+            task.preferred_backend,
+            api_keys[task.preferred_backend],
+            api_models[task.preferred_backend],
+            workspace_path,
+        )
+        return (
+            f"{task.preferred_backend} CLI hit a local runtime/session issue before the model could answer, "
+            f"so this worker used the configured {backend_api_name(task.preferred_backend)} API fallback "
+            "automatically.\n\n"
+            f"{api_output}"
+        )
     return output or f"`{task.preferred_backend}` exited with code {result.returncode}."
 
 
-def task_command_args(backend: str, command: str, prompt: str, workspace_path: Path | None = None) -> list[str] | None:
+def task_command_args(
+    backend: str,
+    command: str,
+    prompt: str,
+    workspace_path: Path | None = None,
+    final_output_path: Path | None = None,
+) -> list[str] | None:
     if backend == CODEX_BACKEND:
         args = [command, "exec", "--skip-git-repo-check", "--sandbox", "workspace-write"]
         if workspace_path:
             args.extend(["--cd", str(workspace_path)])
+        if final_output_path:
+            args.extend(["--output-last-message", str(final_output_path)])
         args.append(prompt)
         return args
 
@@ -152,6 +287,92 @@ def task_command_args(backend: str, command: str, prompt: str, workspace_path: P
     return None
 
 
+def codex_final_message_path(workspace_path: Path | None) -> Path | None:
+    if workspace_path is None:
+        return None
+    harness_dir = workspace_path.resolve() / ".chat-orchestrate"
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    return harness_dir / f"codex-final-{uuid4().hex}.md"
+
+
+def read_text_if_present(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _normalized_api_keys(api_keys: dict[str, str] | None = None, openai_api_key: str = "") -> dict[str, str]:
+    normalized = {
+        backend: str(value or "").strip()
+        for backend, value in (api_keys or {}).items()
+        if str(value or "").strip()
+    }
+    if openai_api_key.strip():
+        normalized[CODEX_BACKEND] = openai_api_key.strip()
+    return normalized
+
+
+def backend_process_env(api_keys: dict[str, str] | None = None) -> dict[str, str]:
+    env = sanitized_agent_environment(os.environ.copy())
+    keys = _normalized_api_keys(api_keys)
+    if keys.get(CODEX_BACKEND):
+        env["OPENAI_API_KEY"] = keys[CODEX_BACKEND]
+    if keys.get(CLAUDE_CODE_BACKEND):
+        env["ANTHROPIC_API_KEY"] = keys[CLAUDE_CODE_BACKEND]
+        env["CLAUDE_API_KEY"] = keys[CLAUDE_CODE_BACKEND]
+    if keys.get(GEMINI_CLI_BACKEND):
+        env["GEMINI_API_KEY"] = keys[GEMINI_CLI_BACKEND]
+        env["GOOGLE_API_KEY"] = keys[GEMINI_CLI_BACKEND]
+    return env
+
+
+def sanitized_agent_environment(env: dict[str, str]) -> dict[str, str]:
+    clean = dict(env)
+    for key in PROXY_ENV_KEYS:
+        if _is_dead_local_proxy(clean.get(key)):
+            clean.pop(key, None)
+    return clean
+
+
+def api_httpx_trust_env() -> bool:
+    return not any(_is_dead_local_proxy(os.environ.get(key)) for key in PROXY_ENV_KEYS)
+
+
+def _is_dead_local_proxy(value: str | None) -> bool:
+    if not value:
+        return False
+    parsed = urlparse(value if "://" in value else f"http://{value}")
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"} and parsed.port == 9
+
+
+def is_backend_runtime_failure(backend: str, content: str) -> bool:
+    lowered = " ".join(str(content or "").lower().split())
+    if not lowered:
+        return False
+    common = (
+        "exited with code",
+        "could not start",
+        "command is not reachable",
+        "not executable",
+        "not callable",
+    )
+    return any(marker in lowered for marker in common) or any(
+        marker in lowered for marker in BACKEND_RUNTIME_FAILURE_MARKERS.get(backend, ())
+    )
+
+
+def backend_supports_api_fallback(backend: str) -> bool:
+    return backend in {CODEX_BACKEND, CLAUDE_CODE_BACKEND, GEMINI_CLI_BACKEND}
+
+
+def is_codex_runtime_failure(content: str) -> bool:
+    return is_backend_runtime_failure(CODEX_BACKEND, content)
+
+
 def task_workspace_path(task: DelegatedTask, workspaces_root: Path | None = None) -> Path | None:
     if not workspaces_root:
         return None
@@ -174,25 +395,105 @@ def command_help_text(command: str) -> str:
 
 
 def run_codex_api_task(task: DelegatedTask, api_key: str, model: str) -> str:
-    prompt = (
+    return run_backend_api_task(task, CODEX_BACKEND, api_key, model)
+
+
+def run_backend_api_task(
+    task: DelegatedTask,
+    backend: str,
+    api_key: str,
+    model: str,
+    workspace_path: Path | None = None,
+) -> str:
+    prompt = task_api_prompt(task)
+    project = ProjectSpace(task.project, workspace_path) if workspace_path else None
+    prompt = build_api_harness_prompt(prompt, project)
+    if backend == CODEX_BACKEND:
+        output = run_openai_response_api(prompt, api_key, model)
+    elif backend == CLAUDE_CODE_BACKEND:
+        output = run_claude_messages_api(prompt, api_key, model)
+    elif backend == GEMINI_CLI_BACKEND:
+        output = run_gemini_generate_content_api(prompt, api_key, model)
+    else:
+        return f"No API fallback is configured for backend `{backend}`."
+    return apply_api_harness_response(project, output).content
+
+
+def task_api_prompt(task: DelegatedTask) -> str:
+    return (
         f"You are the `{task.role}` agent for a distributed project run.\n\n"
         f"Task: {task.title}\n"
         f"Project space: {task.project}\n"
         f"Goal:\n{task.goal}\n\n"
+        "Answer the user's latest request directly first, then include concrete files, commands, diagnostics, "
+        "or blockers as needed.\n\n"
         "Return a concrete, useful result for your assigned role."
     )
+
+
+def run_openai_response_api(prompt: str, api_key: str, model: str) -> str:
     try:
         response = httpx.post(
             "https://api.openai.com/v1/responses",
             headers={"Authorization": f"Bearer {api_key}"},
             json={"model": model, "input": prompt},
             timeout=180,
+            trust_env=api_httpx_trust_env(),
         )
     except httpx.HTTPError as exc:
         return f"OpenAI API request failed: {exc}"
     if response.status_code >= 400:
         return f"OpenAI API request failed: HTTP {response.status_code} {response.text}"
     return extract_response_text(response.json())
+
+
+def run_claude_messages_api(prompt: str, api_key: str, model: str) -> str:
+    try:
+        response = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=180,
+            trust_env=api_httpx_trust_env(),
+        )
+    except httpx.HTTPError as exc:
+        return f"Claude API request failed: {exc}"
+    if response.status_code >= 400:
+        return f"Claude API request failed: HTTP {response.status_code} {response.text}"
+    return extract_claude_response_text(response.json())
+
+
+def run_gemini_generate_content_api(prompt: str, api_key: str, model: str) -> str:
+    try:
+        response = httpx.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+            timeout=180,
+            trust_env=api_httpx_trust_env(),
+        )
+    except httpx.HTTPError as exc:
+        return f"Gemini API request failed: {exc}"
+    if response.status_code >= 400:
+        return f"Gemini API request failed: HTTP {response.status_code} {response.text}"
+    return extract_gemini_response_text(response.json())
+
+
+def backend_api_name(backend: str) -> str:
+    if backend == CODEX_BACKEND:
+        return "OpenAI"
+    if backend == CLAUDE_CODE_BACKEND:
+        return "Claude"
+    if backend == GEMINI_CLI_BACKEND:
+        return "Gemini"
+    return backend
 
 
 def extract_response_text(payload: dict) -> str:
@@ -211,6 +512,34 @@ def extract_response_text(payload: dict) -> str:
             if isinstance(text, str) and text.strip():
                 parts.append(text.strip())
     return "\n\n".join(parts).strip() or "No text output returned by the OpenAI API."
+
+
+def extract_claude_response_text(payload: dict) -> str:
+    parts = []
+    for item in payload.get("content", []):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts).strip() or "No text output returned by the Claude API."
+
+
+def extract_gemini_response_text(payload: dict) -> str:
+    parts = []
+    for candidate in payload.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content", {})
+        if not isinstance(content, dict):
+            continue
+        for part in content.get("parts", []):
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n\n".join(parts).strip() or "No text output returned by the Gemini API."
 
 
 def _is_available(backend: str, command_overrides: dict[str, str] | None = None) -> bool:

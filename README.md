@@ -49,13 +49,13 @@ Then run your OpenSwarm API separately:
 swarm-api
 ```
 
-Open Chainlit at [http://localhost:7862](http://localhost:7862). The local launcher binds to `0.0.0.0` by default, so `localhost` stays available on the machine running it and the terminal also prints LAN URLs such as `http://<machine-ip>:7862` for other devices on the same Wi-Fi/hotspot. Use `.\scripts\run_local.ps1 -HostName 127.0.0.1` or `./scripts/run_local.sh --host 127.0.0.1` when you want UI access locked to this machine only.
+Open Chainlit at [http://localhost:7862](http://localhost:7862). The local launcher binds to `127.0.0.1` by default so the browser opens cleanly on localhost. Use `.\scripts\run_local.ps1 -HostName 0.0.0.0` or `./scripts/run_local.sh --host 0.0.0.0` when you want the UI reachable from other devices on the same Wi-Fi/hotspot; the terminal will print LAN URLs such as `http://<machine-ip>:7862`.
 
 The launcher supervises the local UI and worker: if the Chainlit child exits unexpectedly, it restarts it so localhost comes back; if the worker child drops, it is relaunched while the UI remains up. Press `q` then Enter or Ctrl-C for an intentional clean shutdown. Pass `--no-keepalive` (or `-NoKeepAlive` in PowerShell) for one-shot debugging.
 
-Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex` and `claude`; if neither is available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
+Normal chat messages use locally installed agent CLIs when available. With `AGENT_BACKENDS=auto`, the app detects `codex`, `claude`, and `gemini`; if none are available, it falls back to the simulated preview client. Set `USE_LOCAL_AGENT_CHAT=false` to force preview mode.
 
-The Chainlit sidebar includes a **Local Agent** selector so you can choose `codex`, `claude-code`, `openswarm`, or `simulated` without editing `.env`. The sidebar updates to show only the credential/profile fields for that selected agent. The selected backend is advertised to the cluster, and chat turns use that local profile when it is ready. Codex can use a working CLI command or a saved `OPENAI_API_KEY` / sidebar **OpenAI API Key** for Responses API fallback. Claude Code uses its local command/login profile. Credentials are saved locally in ignored `ui_state.json`, so each computer keeps its own agent harness profile without committing secrets. The app can also detect the Microsoft Store Codex desktop app and offer **Launch Codex App** for login/setup, but GUI app installation is separate from headless agent execution.
+The Chainlit sidebar includes a **Local Agent** selector so you can choose `codex`, `claude-code`, `gemini-cli`, `openswarm`, or `simulated` without editing `.env`. The sidebar updates to show only the credential/profile fields for that selected agent. The selected backend is advertised to the cluster, and chat turns use that local profile when it is ready. Codex, Claude Code, and Gemini CLI all first try the local CLI, then use the saved provider API key as a fallback if the CLI is missing, exits empty, or hits a local session/runtime failure. Credentials are saved locally in ignored `ui_state.json`, so each computer keeps its own agent harness profile without committing secrets. The app can also detect the Microsoft Store Codex desktop app and offer **Launch Codex App** for login/setup, but GUI app installation is separate from headless agent execution.
 
 Machine capability tags are computed, not hand-authored. The coordinator infers roles from the selected local agent, detected tool readiness, the default agent set, and the current chat goal. A prompt that asks for a backend here and frontend on another machine should advertise and route `backend`/`frontend` work differently from a prompt that only asks for review or documentation.
 
@@ -75,9 +75,11 @@ or on macOS/Linux:
 
 That starts the generated FastAPI backend and a local frontend preview, then prints URLs such as `http://localhost:5173` and `/api/search?q=python`.
 
-Selecting an agent is separate from being ready to execute it. Codex and Claude Code should be signed in through their normal local CLI flows and launched from a terminal where `codex` or `claude` is on `PATH`, or configured with a full command path in the sidebar. A signed-in desktop app can be launched for setup, but the harness cannot reuse a GUI-only desktop session as a headless worker unless a callable CLI/API path is also available. If Codex CLI is unavailable, saving an OpenAI API key in the sidebar enables the Codex API fallback.
+Selecting an agent is separate from being ready to execute it. Codex, Claude Code, and Gemini CLI should be signed in through their normal local CLI flows and launched from a terminal where `codex`, `claude`, or `gemini` is on `PATH`, or configured with a full command path in the sidebar. A signed-in desktop app can be launched for setup, but the harness cannot reuse a GUI-only desktop session as a headless worker unless a callable CLI/API path is also available. If a local CLI is unavailable or fails before returning a usable answer, saving the matching provider key in the sidebar enables API fallback for that selected backend.
 
-Use **Auto-detect Agents** or `/detect-agents` to scan PATH plus common npm, user-local, WindowsApps, Homebrew, and local bin install locations for `codex` and `claude`. If you installed a command after the app started or changed terminal PATH, use **Restart App** or `/restart-app`; when launched through `scripts/run_local.py`, the supervisor relaunches the UI and worker automatically.
+Use **Auto-detect Agents** or `/detect-agents` to scan PATH plus common npm, user-local, WindowsApps, Homebrew, and local bin install locations for `codex`, `claude`, and `gemini`. If you installed a command after the app started or changed terminal PATH, use **Restart App** or `/restart-app`; when launched through `scripts/run_local.py`, the supervisor relaunches the UI and worker automatically.
+
+For CLI/session failures, save the matching provider key in the settings panel: OpenAI for Codex, Claude for Claude Code, or Gemini for Gemini CLI. The harness retries the same prompt through that provider API fallback. For implementation work, that fallback is workspace-aware: it sends a compact snapshot of relevant project files to the model, accepts either a structured file manifest or normal markdown file headings with fenced code blocks, writes those files under the active project workspace, and reports the concrete artifacts. If no key is saved, it surfaces the local diagnostic instead of generating fake replacement code.
 
 ## Project Spaces
 
@@ -214,7 +216,7 @@ On macOS/Linux, use the `.sh` versions with the Python-style flags:
 
 ## Fresh GitHub Clone
 
-Runtime files are ignored: `.env`, `runtime_config.json`, `ui_state.json`, `coordination_state.json`, `workspace_state.json`, and `workspaces/`. A new clone starts clean.
+Runtime files are ignored: `.env`, `runtime_config.json`, `ui_state.json`, `coordination_state.json`, `workspace_state.json`, `.tmp/`, and `workspaces/`. A new clone starts clean. See [docs/FILE_LAYOUT.md](docs/FILE_LAYOUT.md) for the source/runtime/workspace boundary.
 
 For a shared swarm, give friends the same `CLUSTER_ID`, `COORDINATION_TOKEN`, and either the shared state location or HTTP coordinator URL out of band. Do not commit those values.
 
@@ -250,6 +252,7 @@ scripts/
 docs/
   ARCHITECTURE.md
   DEPLOYMENT.md
+  FILE_LAYOUT.md
   PROJECT_SPACES.md
   DISTRIBUTED_COORDINATION.md
 tests/

@@ -12,6 +12,7 @@ from chat_orchestrate.backends import (
 )
 from chat_orchestrate.coordination import CoordinationManager
 from chat_orchestrate.models import ProjectSpace
+import chat_orchestrate.backends as backends
 
 
 def test_claim_orchestrator_marks_local_machine(tmp_path: Path) -> None:
@@ -163,6 +164,90 @@ def test_task_command_args_give_codex_workspace_write_access(tmp_path: Path) -> 
         str(tmp_path),
         "do work",
     ]
+
+
+def test_task_command_args_can_capture_codex_final_message(tmp_path: Path) -> None:
+    final_output = tmp_path / ".chat-orchestrate" / "codex-final.md"
+    args = task_command_args(CODEX_BACKEND, "codex", "do work", tmp_path, final_output)
+
+    assert "--output-last-message" in args
+    assert str(final_output) in args
+    assert args[-1] == "do work"
+
+
+def test_run_task_uses_codex_api_fallback_after_runtime_state_failure(tmp_path: Path, monkeypatch) -> None:
+    manager = CoordinationManager(tmp_path / "coordination.json", "machine-a", ["engineer"], ["codex"])
+    manager.heartbeat()
+    manager.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "build the feature with codex",
+    )
+    task = manager.claim_next_task()
+
+    monkeypatch.setattr(backends, "command_for_backend", lambda backend, overrides=None: "codex")
+    monkeypatch.setattr(
+        backends,
+        "task_command_args",
+        lambda backend, command, prompt, workspace_path=None, final_output_path=None: [
+            "python",
+            "-c",
+            "import sys; sys.stderr.write('codex_rollout::state_db: failed to open state db: readonly database')",
+        ],
+    )
+    monkeypatch.setattr(
+        backends,
+        "run_backend_api_task",
+        lambda task, backend, api_key, model, workspace_path=None: "api recovered",
+    )
+
+    result = run_task(
+        task,
+        dry_run=False,
+        openai_api_key="sk-test",
+        workspaces_root=tmp_path,
+    )
+
+    assert "used the configured Codex API fallback automatically" in result
+    assert "api recovered" in result
+
+
+def test_run_task_uses_matching_api_fallback_for_claude_and_gemini(tmp_path: Path, monkeypatch) -> None:
+    for backend_name in [CLAUDE_CODE_BACKEND, GEMINI_CLI_BACKEND]:
+        manager = CoordinationManager(tmp_path / f"{backend_name}.json", "machine-a", ["engineer"], [backend_name])
+        manager.heartbeat()
+        manager.plan_delegation(
+            "run-1",
+            ProjectSpace(name="demo", path=tmp_path / "demo"),
+            f"build the feature with {backend_name}",
+        )
+        task = manager.claim_next_task()
+
+        monkeypatch.setattr(backends, "command_for_backend", lambda backend, overrides=None: backend_name)
+        monkeypatch.setattr(
+            backends,
+            "task_command_args",
+            lambda backend, command, prompt, workspace_path=None, final_output_path=None: [
+                "python",
+                "-c",
+                "import sys; sys.stderr.write('authentication failed: not logged in')",
+            ],
+        )
+        monkeypatch.setattr(
+            backends,
+            "run_backend_api_task",
+            lambda task, backend, api_key, model, workspace_path=None: f"{backend} recovered",
+        )
+
+        result = run_task(
+            task,
+            dry_run=False,
+            api_keys={backend_name: "test-key"},
+            workspaces_root=tmp_path,
+        )
+
+        assert f"configured {backends.backend_api_name(backend_name)} API fallback" in result
+        assert f"{backend_name} recovered" in result
 
 
 def test_task_command_args_give_claude_workspace_access(tmp_path: Path, monkeypatch) -> None:

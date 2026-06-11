@@ -4,23 +4,80 @@ import asyncio
 import os
 import subprocess
 import threading
+import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 
+from .api_harness import apply_api_harness_response, build_api_harness_prompt
+from .artifacts import scan_project_artifacts
 from .backends import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
     GEMINI_CLI_BACKEND,
     SIMULATED_BACKEND,
+    api_httpx_trust_env,
+    backend_api_name,
+    backend_supports_api_fallback,
     command_for_backend,
+    codex_final_message_path,
     detect_agent_backends,
+    extract_claude_response_text,
+    extract_gemini_response_text,
     extract_response_text,
+    is_backend_runtime_failure,
+    read_text_if_present,
+    sanitized_agent_environment,
     task_command_args,
 )
 from .config import Settings
 from .models import AgentSpec, ProgressUpdate, ProjectSpace
-from .scaffold import scaffold_project
+from .scaffold import scaffold_project, should_scaffold
+
+
+ARTIFACT_FINISH_MIN_SECONDS = 20.0
+ARTIFACT_FINISH_QUIET_SECONDS = 10.0
+
+BENIGN_STDERR_MARKERS = (
+    "codex_core_skills::loader: ignoring interface.icon_small",
+    "codex_core_skills::loader: ignoring interface.icon_large",
+    "icon path with '..' must resolve under plugin assets/",
+    "codex_core::shell_snapshot: Failed to create shell snapshot",
+    "Shell snapshot not supported yet for PowerShell",
+    "warning: could not open directory '.pytest-tmp",
+    "warning: could not open directory \".pytest-tmp",
+    "failed to clean up stale arg0 temp dirs",
+    "proceeding, even though we could not update path",
+    "\\.codex\\tmp\\arg0\\",
+)
+
+SURFACED_STDERR_MARKERS = (
+    "access is denied",
+    "denied",
+    "exception",
+    "failed",
+    "forbidden",
+    "in-process app-server client",
+    "not found",
+    "panic",
+    "problem",
+    "readonly database",
+    "state db",
+    "state_",
+    "traceback",
+    "unauthorized",
+)
+
+
+def is_benign_agent_stderr(line: str) -> bool:
+    clean = str(line or "")
+    if not clean.strip():
+        return True
+    lowered = clean.lower()
+    if "time_wait" in lowered and "tcp " in lowered:
+        return True
+    return any(marker.lower() in lowered for marker in BENIGN_STDERR_MARKERS)
 
 
 def workspace_write_contract(project: ProjectSpace) -> str:
@@ -63,6 +120,10 @@ class OpenSwarmClient(SwarmClient):
         prompt = (
             f"You are {agent.name}, acting as {agent.role}.\n"
             f"{agent.instructions}\n\n"
+            "Response contract:\n"
+            "- Answer the user's latest message directly first, in normal assistant prose.\n"
+            "- Then include concrete implementation, diagnostics, changed files, commands, or blockers as needed.\n"
+            "- Do not lead with generic coordination status, proof sections, or internal routing unless that is the answer.\n\n"
             f"Project space: {project.name}\n"
             f"Path: {project.path}\n"
             f"Branch: {project.branch or 'unknown'}\n\n"
@@ -157,6 +218,11 @@ class LocalAgentCliClient(SwarmClient):
             or self.api_keys.get(CODEX_BACKEND, "")
             or settings.openai_api_key.strip()
         )
+        self.api_keys.setdefault(CODEX_BACKEND, self.openai_api_key)
+        if settings.claude_api_key.strip():
+            self.api_keys.setdefault(CLAUDE_CODE_BACKEND, settings.claude_api_key.strip())
+        if settings.gemini_api_key.strip():
+            self.api_keys.setdefault(GEMINI_CLI_BACKEND, settings.gemini_api_key.strip())
         self.backends = [
             backend
             for backend in detect_agent_backends(settings.configured_backends, self.command_overrides)
@@ -178,6 +244,11 @@ class LocalAgentCliClient(SwarmClient):
         goal: str,
         context: str,
     ) -> AsyncIterator[ProgressUpdate | str]:
+        if self.preferred_backend == SIMULATED_BACKEND:
+            async for event in self.preview.run_agent_events(agent, project, goal, context):
+                yield event
+            return
+
         prompt = self._agent_prompt(agent, project, goal, context)
         for backend in self._ordered_backends():
             async for event in self._run_backend_events(backend, prompt, project, agent):
@@ -185,54 +256,94 @@ class LocalAgentCliClient(SwarmClient):
                     yield event
                     continue
                 if event:
-                    recovery = self._recover_workspace_artifacts(project, goal, agent.role, event)
-                    if recovery:
+                    if self._is_recoverable_backend_runtime_failure(backend, event):
                         yield ProgressUpdate(
-                            message=recovery,
-                            phase="agent-output",
+                            message=(
+                                f"{backend} CLI hit a local runtime/session issue before the model could answer; "
+                                f"checking the configured {backend_api_name(backend)} API fallback automatically."
+                            ),
+                            phase="agent-recovery",
                             agent=agent.name,
                             role=agent.role,
                             preferred_backend=backend,
                         )
-                    yield f"`{backend}` local response\n\n{event}{self._recovery_note(recovery)}"
+                        if not self._backend_api_key(backend):
+                            yield ProgressUpdate(
+                                message=(
+                                    f"No {backend_api_name(backend)} API key is saved for `{backend}` fallback, so "
+                                    "I am surfacing the local runtime failure instead of inventing an answer."
+                                ),
+                                phase="agent-recovery",
+                                agent=agent.name,
+                                role=agent.role,
+                                preferred_backend=backend,
+                            )
+                            api_output = ""
+                        else:
+                            yield ProgressUpdate(
+                                message=(
+                                    f"{backend} API fallback is running as a workspace write harness for "
+                                    f"`{project.name}`."
+                                ),
+                                phase="agent-recovery",
+                                agent=agent.name,
+                                role=agent.role,
+                                preferred_backend=backend,
+                            )
+                            api_output = await self._try_backend_api_recovery(backend, prompt, project)
+                        if api_output:
+                            yield f"`{backend}` API fallback response\n\n{api_output}"
+                            return
+                        if self.preferred_backend != backend:
+                            continue
+                    yield f"`{backend}` local response\n\n{event}"
                     return
-            if backend == CODEX_BACKEND:
+            if backend_supports_api_fallback(backend):
                 yield ProgressUpdate(
-                    message="Codex CLI did not return output; checking the configured API fallback.",
+                    message=(
+                        f"{backend} CLI did not return output; checking the configured "
+                        f"{backend_api_name(backend)} API fallback."
+                    ),
                     phase="agent-output",
                     agent=agent.name,
                     role=agent.role,
                     preferred_backend=backend,
                 )
-                api_output = await self._run_codex_api(prompt)
+                api_output = await self._try_backend_api_recovery(backend, prompt, project)
                 if api_output:
-                    recovery = self._recover_workspace_artifacts(project, goal, agent.role, api_output)
-                    if recovery:
-                        yield ProgressUpdate(
-                            message=recovery,
-                            phase="agent-output",
-                            agent=agent.name,
-                            role=agent.role,
-                            preferred_backend=backend,
-                        )
-                    yield f"`{backend}` API response\n\n{api_output}{self._recovery_note(recovery)}"
+                    yield f"`{backend}` API response\n\n{api_output}"
                     return
             if self.preferred_backend == backend and backend != SIMULATED_BACKEND:
                 yield ProgressUpdate(
                     message=(
                         f"{backend} is selected but not callable here. Tried `{self._configured_command_label(backend)}`; "
-                        "continuing with the local preview fallback so the workspace still gets visible code artifacts."
+                        "no simulated fallback was used."
                     ),
                     phase="agent-warning",
                     agent=agent.name,
                     role=agent.role,
                     preferred_backend=backend,
                 )
-                async for event in self.preview.run_agent_events(agent, project, goal, context):
-                    yield event
+                yield (
+                    f"`{backend}` was selected, but this app process did not receive a usable response from it.\n\n"
+                    f"Tried command: `{self._configured_command_label(backend)}`\n\n"
+                    "The harness did not generate replacement code. Pick `simulated` explicitly for preview scaffolding, "
+                    "or fix the selected local agent command/session and retry."
+                )
                 return
-        async for event in self.preview.run_agent_events(agent, project, goal, context):
-            yield event
+        yield (
+            "No configured local agent backend returned a response.\n\n"
+            "The harness did not generate replacement code. Select a reachable `codex`, `claude-code`, "
+            "`gemini-cli`, or explicitly select `simulated` for preview scaffolding."
+        )
+
+    async def _try_backend_api_recovery(self, backend: str, prompt: str, project: ProjectSpace | None = None) -> str:
+        if not self._backend_api_key(backend):
+            return ""
+        return await self._run_backend_api_fallback(backend, prompt, project)
+
+    def _is_recoverable_backend_runtime_failure(self, backend: str, content: str) -> bool:
+        return is_backend_runtime_failure(backend, content)
 
     def _agent_prompt(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
         return (
@@ -241,6 +352,10 @@ class LocalAgentCliClient(SwarmClient):
             "Be concrete, linguistic, and useful. If the user asks for implementation, propose or perform "
             "specific work inside the project space. If distributed coordination context assigns work to "
             "another machine, respect that assignment and focus on your own role.\n\n"
+            "Response contract:\n"
+            "- Answer the user's latest message directly first, in normal assistant prose.\n"
+            "- Then include concrete implementation, diagnostics, changed files, commands, or blockers as needed.\n"
+            "- Do not lead with generic coordination status, proof sections, or internal routing unless that is the answer.\n\n"
             f"{workspace_write_contract(project)}\n\n"
             f"Project space: {project.name}\n"
             f"Path: {project.path}\n"
@@ -292,8 +407,9 @@ class LocalAgentCliClient(SwarmClient):
             )
             yield ""
             return
-        workspace_path = project.path if project.path.exists() and project.path.is_dir() else None
-        args = task_command_args(backend, command, prompt, workspace_path)
+        workspace_path = project.path.resolve() if project.path.exists() and project.path.is_dir() else None
+        final_output_path = codex_final_message_path(workspace_path) if backend == CODEX_BACKEND else None
+        args = task_command_args(backend, command, prompt, workspace_path, final_output_path)
         if args is None:
             yield ProgressUpdate(
                 message=f"{backend} has no runnable command template yet.",
@@ -310,6 +426,7 @@ class LocalAgentCliClient(SwarmClient):
                 args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 cwd=workspace_path,
                 env=self._backend_env(backend),
                 text=True,
@@ -359,7 +476,7 @@ class LocalAgentCliClient(SwarmClient):
                         flush_buffer()
                         continue
                     buffer.append(char)
-                    if len(buffer) >= 160:
+                    if len(buffer) >= 1000:
                         flush_buffer()
                 flush_buffer()
             finally:
@@ -373,10 +490,22 @@ class LocalAgentCliClient(SwarmClient):
         threading.Thread(target=wait_for_process, daemon=True).start()
 
         started = loop.time()
+        started_wall = time.time()
+        last_activity = started
         deadline = started + self.settings.local_agent_timeout_seconds
         streams_remaining = 2
         process_done = False
+        finished_for_artifacts = False
         return_code = 0
+
+        def artifact_finish_due(now: float) -> bool:
+            return (
+                not process_done
+                and not finished_for_artifacts
+                and now - started >= ARTIFACT_FINISH_MIN_SECONDS
+                and now - last_activity >= ARTIFACT_FINISH_QUIET_SECONDS
+                and self._workspace_has_recent_artifacts(project, started_wall)
+            )
 
         while True:
             if process_done and streams_remaining <= 0 and queue.empty():
@@ -397,6 +526,21 @@ class LocalAgentCliClient(SwarmClient):
             try:
                 label, line = await asyncio.wait_for(queue.get(), timeout=min(0.5, remaining))
             except asyncio.TimeoutError:
+                now = loop.time()
+                if artifact_finish_due(now):
+                    finished_for_artifacts = True
+                    self._terminate_process(process)
+                    yield ProgressUpdate(
+                        message=(
+                            "Workspace files have been written and the CLI is quiet; "
+                            "collecting the generated artifacts now."
+                        ),
+                        phase="agent-output",
+                        agent=agent.name,
+                        role=agent.role,
+                        preferred_backend=backend,
+                        elapsed_seconds=int(now - started),
+                    )
                 continue
             if label == "process-done":
                 process_done = True
@@ -409,10 +553,46 @@ class LocalAgentCliClient(SwarmClient):
                 streams_remaining -= 1
                 continue
             if label == "stderr":
+                if self._is_benign_stderr(line):
+                    now = loop.time()
+                    if artifact_finish_due(now):
+                        finished_for_artifacts = True
+                        self._terminate_process(process)
+                        yield ProgressUpdate(
+                            message=(
+                                "Workspace files have been written and the CLI is quiet; "
+                                "collecting the generated artifacts now."
+                            ),
+                            phase="agent-output",
+                            agent=agent.name,
+                            role=agent.role,
+                            preferred_backend=backend,
+                            elapsed_seconds=int(now - started),
+                        )
+                    continue
+                if not self._should_surface_stderr(line):
+                    now = loop.time()
+                    if artifact_finish_due(now):
+                        finished_for_artifacts = True
+                        self._terminate_process(process)
+                        yield ProgressUpdate(
+                            message=(
+                                "Workspace files have been written and the CLI is quiet; "
+                                "collecting the generated artifacts now."
+                            ),
+                            phase="agent-output",
+                            agent=agent.name,
+                            role=agent.role,
+                            preferred_backend=backend,
+                            elapsed_seconds=int(now - started),
+                        )
+                    continue
+                last_activity = loop.time()
                 error_parts.append(line)
                 phase = "agent-warning"
                 stream_label = "stderr"
             else:
+                last_activity = loop.time()
                 output_parts.append(line)
                 phase = "agent-output"
                 stream_label = "output"
@@ -425,7 +605,7 @@ class LocalAgentCliClient(SwarmClient):
                 elapsed_seconds=int(loop.time() - started),
             )
 
-        if return_code != 0:
+        if return_code != 0 and not finished_for_artifacts:
             yield ProgressUpdate(
                 message=f"{backend} exited with code {return_code}.",
                 phase="agent-error",
@@ -434,13 +614,21 @@ class LocalAgentCliClient(SwarmClient):
                 preferred_backend=backend,
                 elapsed_seconds=int(loop.time() - started),
             )
-        yield "\n".join(output_parts or error_parts).strip()
+        final = read_text_if_present(final_output_path) or "\n".join(output_parts or error_parts).strip()
+        if not final and self._workspace_has_recent_artifacts(project, started_wall):
+            final = self._workspace_artifact_result(project)
+        if not final:
+            final = self._empty_backend_result(backend, command, return_code, final_output_path)
+        yield final
 
     async def _run_codex_api(self, prompt: str) -> str:
         if not self.openai_api_key:
             return ""
         try:
-            async with httpx.AsyncClient(timeout=self.settings.local_agent_timeout_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=self.settings.local_agent_timeout_seconds,
+                trust_env=api_httpx_trust_env(),
+            ) as client:
                 response = await client.post(
                     "https://api.openai.com/v1/responses",
                     headers={"Authorization": f"Bearer {self.openai_api_key}"},
@@ -454,6 +642,75 @@ class LocalAgentCliClient(SwarmClient):
             return extract_response_text(response.json())
         except httpx.HTTPError as exc:
             return f"OpenAI API request failed: {exc}"
+
+    async def _run_backend_api_fallback(
+        self,
+        backend: str,
+        prompt: str,
+        project: ProjectSpace | None = None,
+    ) -> str:
+        harness_prompt = build_api_harness_prompt(prompt, project)
+        if backend == CODEX_BACKEND:
+            output = await self._run_codex_api(harness_prompt)
+        elif backend == CLAUDE_CODE_BACKEND:
+            output = await self._run_claude_api(harness_prompt)
+        elif backend == GEMINI_CLI_BACKEND:
+            output = await self._run_gemini_api(harness_prompt)
+        else:
+            return ""
+        return apply_api_harness_response(project, output).content
+
+    async def _run_claude_api(self, prompt: str) -> str:
+        api_key = self._backend_api_key(CLAUDE_CODE_BACKEND)
+        if not api_key:
+            return ""
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.settings.local_agent_timeout_seconds,
+                trust_env=api_httpx_trust_env(),
+            ) as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                    },
+                    json={
+                        "model": self.settings.claude_api_model,
+                        "max_tokens": 4096,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+            if response.status_code >= 400:
+                return f"Claude API request failed: HTTP {response.status_code} {response.text}"
+            return extract_claude_response_text(response.json())
+        except httpx.HTTPError as exc:
+            return f"Claude API request failed: {exc}"
+
+    async def _run_gemini_api(self, prompt: str) -> str:
+        api_key = self._backend_api_key(GEMINI_CLI_BACKEND)
+        if not api_key:
+            return ""
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.settings.local_agent_timeout_seconds,
+                trust_env=api_httpx_trust_env(),
+            ) as client:
+                response = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{self.settings.gemini_api_model}:generateContent",
+                    params={"key": api_key},
+                    json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+                )
+            if response.status_code >= 400:
+                return f"Gemini API request failed: HTTP {response.status_code} {response.text}"
+            return extract_gemini_response_text(response.json())
+        except httpx.HTTPError as exc:
+            return f"Gemini API request failed: {exc}"
+
+    def _backend_api_key(self, backend: str) -> str:
+        if backend == CODEX_BACKEND:
+            return self.openai_api_key
+        return self.api_keys.get(backend, "")
 
     def _command_for_backend(self, backend: str) -> str | None:
         return command_for_backend(backend, self.command_overrides)
@@ -480,6 +737,67 @@ class LocalAgentCliClient(SwarmClient):
             return clean
         return f"{clean[: limit - 1]}..."
 
+    def _is_benign_stderr(self, line: str) -> bool:
+        return is_benign_agent_stderr(line)
+
+    def _should_surface_stderr(self, line: str) -> bool:
+        lowered = str(line or "").lower()
+        return any(marker in lowered for marker in SURFACED_STDERR_MARKERS)
+
+    def _workspace_has_recent_artifacts(self, project: ProjectSpace, started_wall: float) -> bool:
+        for artifact in scan_project_artifacts(project, limit=6):
+            try:
+                if Path(artifact.absolute_path).stat().st_mtime >= started_wall - 1:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _workspace_has_artifacts(self, project: ProjectSpace) -> bool:
+        return bool(scan_project_artifacts(project, limit=1))
+
+    def _workspace_artifact_result(self, project: ProjectSpace) -> str:
+        artifacts = scan_project_artifacts(project, limit=8)
+        paths = ", ".join(f"`{artifact.relative_path}`" for artifact in artifacts)
+        return (
+            "The selected local agent did not return final chat text, but workspace files changed during this run.\n\n"
+            f"Workspace: `{project.path.resolve()}`\n"
+            f"Changed artifacts: {paths}."
+        )
+
+    def _empty_backend_result(
+        self,
+        backend: str,
+        command: str,
+        return_code: int,
+        final_output_path: Path | None,
+    ) -> str:
+        lines = [
+            f"`{backend}` exited with code `{return_code}` but did not return final chat text.",
+            "",
+            f"Tried command: `{command}`",
+        ]
+        if final_output_path is not None:
+            lines.extend(
+                [
+                    f"Expected final-message file: `{final_output_path}`",
+                    "",
+                    "That file is internal harness plumbing, not project source. Generated project code belongs under "
+                    "the active workspace's `frontend/`, `backend/`, and `README.generated.md` files.",
+                    "",
+                    "For Codex, the harness now passes `--output-last-message` and reads that file directly. "
+                    "If this keeps happening, run the same Codex command from a terminal to check login, model, "
+                    "or sandbox prompts.",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _terminate_process(self, process: subprocess.Popen) -> None:
+        try:
+            process.terminate()
+        except OSError:
+            return
+
     def _recover_workspace_artifacts(self, project: ProjectSpace, goal: str, role: str, output: str) -> str:
         lowered = output.lower()
         blocked = any(
@@ -495,19 +813,39 @@ class LocalAgentCliClient(SwarmClient):
                 "could not create",
             ]
         )
-        if not blocked:
+        missing_visible_artifacts = self._workspace_needs_visible_scaffold(project, goal, role)
+        if not blocked and not missing_visible_artifacts:
             return ""
         written = scaffold_project(project, goal, role)
         if not written:
             return ""
         relative = [path.relative_to(project.path).as_posix() for path in written]
-        return "Workspace recovery wrote visible code artifacts: " + ", ".join(f"`{item}`" for item in relative[:8])
+        prefix = (
+            "Workspace recovery wrote visible code artifacts"
+            if blocked
+            else "Filled missing visible workspace artifacts"
+        )
+        return f"{prefix}: " + ", ".join(f"`{item}`" for item in relative[:8])
+
+    def _workspace_needs_visible_scaffold(self, project: ProjectSpace, goal: str, role: str) -> bool:
+        if not should_scaffold(goal, role):
+            return False
+        artifacts = {artifact.relative_path for artifact in scan_project_artifacts(project, limit=32)}
+        lowered = f"{goal} {role}".lower()
+        needs_frontend = any(term in lowered for term in ["frontend", "front-end", "website", "page", "ui", "browser"])
+        needs_backend = any(term in lowered for term in ["backend", "back-end", "api", "server", "database"])
+        has_frontend = any(
+            path.startswith("frontend/") or path.startswith("public/") or path in {"index.html", "app.js", "styles.css"}
+            for path in artifacts
+        )
+        has_backend = any(path.startswith("backend/") or path in {"server.js", "app.py"} for path in artifacts)
+        return (needs_frontend and not has_frontend) or (needs_backend and not has_backend)
 
     def _recovery_note(self, recovery: str) -> str:
         return f"\n\n{recovery}" if recovery else ""
 
     def _backend_env(self, backend: str) -> dict[str, str]:
-        env = os.environ.copy()
+        env = sanitized_agent_environment(os.environ.copy())
         if self.openai_api_key:
             env["OPENAI_API_KEY"] = self.openai_api_key
         claude_key = self.api_keys.get(CLAUDE_CODE_BACKEND, "")

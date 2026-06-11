@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import os
 import socket
 import subprocess
@@ -39,11 +40,19 @@ class FrontendPreviewHandler(SimpleHTTPRequestHandler):
     def _send_index(self) -> None:
         index_path = Path(self.directory) / "index.html"
         html = index_path.read_text(encoding="utf-8")
-        injected = (
-            f'<script>window.SEARCHLY_API_BASE = "{self.api_base}";</script>\n'
-            '    <script src="./app.js"></script>'
+        api_base_json = json.dumps(self.api_base)
+        api_config = (
+            "<script>\n"
+            f"      window.FORGEHUB_API_BASE = {api_base_json};\n"
+            f"      window.SEARCHLY_API_BASE = {api_base_json};\n"
+            f"      window.CHAT_ORCHESTRATE_API_BASE = {api_base_json};\n"
+            "    </script>"
         )
-        html = html.replace('    <script src="./app.js"></script>', f"    {injected}")
+        app_script = '    <script src="./app.js"></script>'
+        if app_script in html:
+            html = html.replace(app_script, f"    {api_config}\n{app_script}", 1)
+        else:
+            html = html.replace("</body>", f"    {api_config}\n  </body>", 1)
         payload = html.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -77,7 +86,9 @@ def start_backend(workspace: Path, host: str, port: int, frontend_port: int) -> 
         f"http://localhost:{frontend_port}",
         f"http://127.0.0.1:{frontend_port}",
     ]
-    env["GOOGLE_LIKE_CORS_ORIGINS"] = ",".join(origins)
+    allowed_origins = ",".join(origins)
+    env["FORGEHUB_CORS_ORIGINS"] = allowed_origins
+    env["GOOGLE_LIKE_CORS_ORIGINS"] = allowed_origins
     return subprocess.Popen(
         [
             sys.executable,
@@ -88,6 +99,7 @@ def start_backend(workspace: Path, host: str, port: int, frontend_port: int) -> 
             host,
             "--port",
             str(port),
+            "--no-access-log",
         ],
         cwd=workspace,
         env=env,
@@ -108,6 +120,25 @@ def wait_for_backend(port: int, timeout_seconds: float = 10.0) -> bool:
             pass
         time.sleep(0.25)
     return False
+
+
+def backend_preview_endpoints(port: int) -> list[tuple[str, str]]:
+    import httpx
+
+    base_url = f"http://127.0.0.1:{port}"
+    candidates = [
+        ("Backend health", "/api/health"),
+        ("Backend repos", "/api/repos"),
+    ]
+    available: list[tuple[str, str]] = []
+    for label, path in candidates:
+        try:
+            response = httpx.get(f"{base_url}{path}", timeout=1.0, trust_env=False)
+        except httpx.HTTPError:
+            continue
+        if response.status_code < 400:
+            available.append((label, f"{base_url}{path}"))
+    return available
 
 
 def serve_frontend(frontend: Path, host: str, port: int, api_base: str, stop_event: threading.Event) -> None:
@@ -156,8 +187,8 @@ def main() -> None:
         frontend_thread.start()
         print(f"Workspace: {workspace}")
         print(f"Frontend: http://localhost:{frontend_port}")
-        print(f"Backend health: {api_base}/api/health")
-        print(f"Backend search: {api_base}/api/search?q=python")
+        for label, url in backend_preview_endpoints(backend_port):
+            print(f"{label}: {url}")
         print("Press q then Enter, or Ctrl-C, to stop preview.")
         while not stop_event.is_set():
             if backend_process.poll() is not None:
