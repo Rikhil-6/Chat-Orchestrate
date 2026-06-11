@@ -1989,17 +1989,18 @@ async def show_connection() -> None:
     await cl.Message(content=connection_cards(), actions=machine_actions()).send()
 
 
-async def configure_http_connection() -> None:
-    await cl.Message(
-        content=(
-            "Connect this machine to a hosted coordinator. Paste the connection pack from the host, "
-            "or paste just the coordinator URL."
+async def configure_http_connection(connection_text: str | None = None) -> None:
+    if connection_text is None or not connection_text.strip():
+        await cl.Message(
+            content=(
+                "Connect this machine to a hosted coordinator. Paste the connection pack from the host, "
+                "or paste just the coordinator URL."
+            )
+        ).send()
+        connection_text = await ask_text(
+            "Coordinator connection pack or URL.",
+            settings.coordination_http_urls or settings.coordination_http_url,
         )
-    ).send()
-    connection_text = await ask_text(
-        "Coordinator connection pack or URL.",
-        settings.coordination_http_urls or settings.coordination_http_url,
-    )
     if connection_text is None:
         return
     parsed = parse_connection_input(connection_text)
@@ -2069,7 +2070,7 @@ async def configure_http_connection() -> None:
     await show_machines()
 
 
-async def host_coordinator() -> None:
+async def host_coordinator(project_name: str | None = None) -> None:
     global coordinator_process, hosted_connection
     if settings.coordination_backend.lower().strip() == "http" and not is_hosting_live():
         await cl.Message(
@@ -2092,10 +2093,11 @@ async def host_coordinator() -> None:
         hosted_connection = {}
 
     default_project_name = default_host_project_name()
-    project_name = await ask_text(
-        "Project/session name for this hosted coordinator. A short random suffix will be added automatically.",
-        default_project_name,
-    )
+    if project_name is None or not project_name.strip():
+        project_name = await ask_text(
+            "Project/session name for this hosted coordinator. A short random suffix will be added automatically.",
+            default_project_name,
+        )
     if project_name is None:
         return
     cluster_id = hosted_cluster_id(project_name)
@@ -2368,13 +2370,17 @@ async def show_connection_action(_: cl.Action) -> None:
 
 
 @cl.action_callback("host_coordinator")
-async def host_coordinator_action(_: cl.Action) -> None:
-    await host_coordinator()
+async def host_coordinator_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    project_name = str(payload.get("project_name", "")).strip() or None
+    await host_coordinator(project_name)
 
 
 @cl.action_callback("configure_http")
-async def configure_http_action(_: cl.Action) -> None:
-    await configure_http_connection()
+async def configure_http_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    connection_text = str(payload.get("connection_text", "")).strip() or None
+    await configure_http_connection(connection_text)
 
 
 @cl.action_callback("configure_file")

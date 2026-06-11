@@ -205,6 +205,136 @@ function SessionStatus({ overview }) {
   return null;
 }
 
+function ConnectionPanel({ overview, workspace }) {
+  const [hostName, setHostName] = useState(workspace.name || "friends-project");
+  const [connectionText, setConnectionText] = useState(overview.coordinator_url || "");
+  const [busy, setBusy] = useState("");
+
+  useEffect(() => {
+    setHostName(workspace.name || "friends-project");
+  }, [workspace.name]);
+
+  useEffect(() => {
+    if (overview.coordinator_url && !connectionText.trim()) {
+      setConnectionText(overview.coordinator_url);
+    }
+  }, [overview.coordinator_url]);
+
+  const runAction = async (name, payload = {}) => {
+    setBusy(name);
+    try {
+      await action(name, payload);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <div className="rounded-md border bg-card p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Network className="h-4 w-4" /> Connection
+          </div>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Host a coordinator here, or join one running on another machine.
+          </p>
+        </div>
+        <Badge variant={overview.hosting_live ? "default" : overview.connected_to_http ? "secondary" : "outline"}>
+          {overview.hosting_live ? "hosting" : overview.connected_to_http ? "connected" : "local"}
+        </Badge>
+      </div>
+
+      <div className="mt-3 grid gap-2 text-xs">
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Mode</span>
+          <strong>{overview.coordination_backend || "file"}</strong>
+        </div>
+        {overview.token_set && (
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Token</span>
+            <strong>set</strong>
+          </div>
+        )}
+        {(overview.host_urls || []).length > 0 && (
+          <div className="grid gap-1">
+            <span className="text-muted-foreground">Host URLs</span>
+            {(overview.host_urls || []).slice(0, 3).map((url) => (
+              <div key={url} className="truncate rounded bg-muted/60 px-2 py-1" title={url}>
+                {url}
+              </div>
+            ))}
+          </div>
+        )}
+        {overview.connected_to_http && overview.coordinator_url && !overview.hosting_live && (
+          <div className="grid gap-1">
+            <span className="text-muted-foreground">Coordinator URL</span>
+            <div className="truncate rounded bg-muted/60 px-2 py-1" title={overview.coordinator_url}>
+              {overview.coordinator_url}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {!overview.connected_to_http && !overview.hosting_live && (
+        <div className="mt-3 grid gap-2">
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">Host session name</span>
+            <input
+              className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+              value={hostName}
+              placeholder="friends-project"
+              onChange={(event) => setHostName(event.target.value)}
+            />
+          </label>
+        </div>
+      )}
+
+      {!overview.hosting_live && (
+        <div className="mt-3 grid gap-2">
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">Connection pack or URL</span>
+            <textarea
+              className="min-h-16 min-w-0 rounded-md border border-input bg-background px-3 py-2 text-xs outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+              value={connectionText}
+              placeholder="Paste Coordinator URL, or the full connection pack from the host"
+              onChange={(event) => setConnectionText(event.target.value)}
+            />
+          </label>
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        {overview.hosting_live ? (
+          <Button variant="destructive" disabled={busy === "end_host"} onClick={() => runAction("end_host")}>
+            <Power className="mr-2 h-4 w-4" /> End Host
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            disabled={!overview.can_host || busy === "host_coordinator"}
+            onClick={() => runAction("host_coordinator", { project_name: hostName })}
+          >
+            <RadioTower className="mr-2 h-4 w-4" /> {overview.connected_to_http ? "Hosting locked" : "Host"}
+          </Button>
+        )}
+        <Button
+          variant="outline"
+          disabled={overview.hosting_live || busy === "configure_http"}
+          onClick={() => runAction("configure_http", { connection_text: connectionText })}
+        >
+          <Network className="mr-2 h-4 w-4" /> Connect
+        </Button>
+        {overview.connected_to_http && !overview.hosting_live && (
+          <Button className="col-span-2" variant="outline" onClick={() => runAction("end_session")}>
+            <LogOut className="mr-2 h-4 w-4" /> End Session
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChatSwitcher({ chats }) {
   const threads = chats.threads || [];
   const activeId = chats.active_id || (threads[0] && threads[0].id) || "";
@@ -577,9 +707,9 @@ export default function HarnessDashboard() {
           <Stat label="Workspace" value={workspace.name || "default"} />
           <Stat label="Coordination" value={overview.coordination_backend || "file"} />
         </div>
+        <ConnectionPanel overview={overview} workspace={workspace} />
         <ProjectSpaceCard workspace={workspace} />
         <ChatSwitcher chats={chats} />
-        <SessionStatus overview={overview} />
       </section>
 
       <section className="space-y-2">
@@ -770,18 +900,6 @@ export default function HarnessDashboard() {
       </section>
 
       <section className="grid grid-cols-2 gap-2">
-        {overview.hosting_live ? (
-          <Button variant="destructive" onClick={() => action("end_host")}>
-            <Power className="mr-2 h-4 w-4" /> End Host
-          </Button>
-        ) : (
-          <Button variant="outline" disabled={!overview.can_host} onClick={() => action("host_coordinator")}>
-            <RadioTower className="mr-2 h-4 w-4" /> {overview.connected_to_http ? "Hosting locked" : "Host"}
-          </Button>
-        )}
-        <Button variant="outline" onClick={() => action("configure_http")}>
-          <Network className="mr-2 h-4 w-4" /> Connect
-        </Button>
         <Button variant="outline" onClick={() => action("show_backends")}>
           <Settings className="mr-2 h-4 w-4" /> Agents
         </Button>
