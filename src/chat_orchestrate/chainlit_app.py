@@ -2094,12 +2094,7 @@ async def host_coordinator(project_name: str | None = None) -> None:
 
     default_project_name = default_host_project_name()
     if project_name is None or not project_name.strip():
-        project_name = await ask_text(
-            "Project/session name for this hosted coordinator. A short random suffix will be added automatically.",
-            default_project_name,
-        )
-    if project_name is None:
-        return
+        project_name = default_project_name
     cluster_id = hosted_cluster_id(project_name)
     token = secrets.token_urlsafe(24)
     port = find_available_port(settings.coordinator_port)
