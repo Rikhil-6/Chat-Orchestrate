@@ -19,6 +19,7 @@ class ProjectSpace:
     project_id: str = ""
     source_kind: str = "none"
     visibility: str = "local-only"
+    repo_owner: str = ""
     git_remote: str | None = None
     branch: str | None = None
     source: str | None = None

@@ -41,6 +41,7 @@ class ProjectSpaceManager:
         project_id: str | None = None,
         source_kind: str | None = None,
         visibility: str | None = None,
+        repo_owner: str | None = None,
     ) -> ProjectSpace:
         clean_name = self._clean_name(name)
         resolved_path = self._resolve_project_path(path)
@@ -56,6 +57,7 @@ class ProjectSpaceManager:
             project_id=project_id or self._stable_project_id(clean_name, existing, manifest),
             source_kind=source_kind or self._infer_source_kind(git_remote or self._git_remote(resolved_path), mode, manifest, existing),
             visibility=visibility or self._infer_visibility(git_remote or self._git_remote(resolved_path), manifest, existing),
+            repo_owner=repo_owner or self._infer_repo_owner(git_remote or self._git_remote(resolved_path), manifest, existing),
             git_remote=git_remote or self._git_remote(resolved_path),
             branch=branch,
             source=source,
@@ -101,6 +103,9 @@ class ProjectSpaceManager:
         source_kind: str | None = None,
         visibility: str | None = None,
         git_remote: str | None = None,
+        repo_owner: str | None = None,
+        mode: str | None = None,
+        source: str | None = None,
     ) -> ProjectSpace:
         current = self.get(name)
         next_name = self._clean_name(project_name or current.name)
@@ -108,11 +113,12 @@ class ProjectSpaceManager:
             next_name,
             current.path,
             git_remote=git_remote if git_remote is not None else current.git_remote,
-            mode=current.mode,
-            source=current.source,
+            mode=mode or current.mode,
+            source=source if source is not None else current.source,
             project_id=current.project_id,
             source_kind=source_kind or current.source_kind,
             visibility=visibility or current.visibility,
+            repo_owner=repo_owner or current.repo_owner,
         )
         if next_name != current.name:
             spaces = self._load()
@@ -198,6 +204,7 @@ class ProjectSpaceManager:
                 project_id=item.get("project_id", ""),
                 source_kind=item.get("source_kind", "none"),
                 visibility=item.get("visibility", "local-only"),
+                repo_owner=item.get("repo_owner", ""),
                 git_remote=item.get("git_remote"),
                 branch=item.get("branch"),
                 source=item.get("source"),
@@ -214,6 +221,7 @@ class ProjectSpaceManager:
                 "project_id": space.project_id,
                 "source_kind": space.source_kind,
                 "visibility": space.visibility,
+                "repo_owner": space.repo_owner,
                 "git_remote": space.git_remote,
                 "branch": space.branch,
                 "source": space.source,
@@ -285,6 +293,17 @@ class ProjectSpaceManager:
             return stored
         return "private" if git_remote else "local-only"
 
+    def _infer_repo_owner(
+        self,
+        git_remote: str | None,
+        manifest: dict[str, object],
+        existing: ProjectSpace | None,
+    ) -> str:
+        stored = str(manifest.get("repo_owner", "")).strip() or (existing.repo_owner if existing else "")
+        if stored:
+            return stored
+        return self._repo_owner_from_remote(git_remote or "")
+
     def _manifest_path(self, path: Path) -> Path:
         return path / "project_profile.json"
 
@@ -307,6 +326,7 @@ class ProjectSpaceManager:
             "sync_mode": space.mode,
             "source_kind": space.source_kind,
             "visibility": space.visibility,
+            "repo_owner": space.repo_owner,
             "git_remote": space.git_remote or "",
             "branch": space.branch or "",
             "source": space.source or "",
@@ -346,12 +366,27 @@ class ProjectSpaceManager:
             raise ProjectSpaceError(detail or f"git {' '.join(args)} failed")
         return result.stdout.strip()
 
+    def _repo_owner_from_remote(self, git_remote: str) -> str:
+        remote = str(git_remote or "").strip()
+        if not remote:
+            return ""
+        match = re.search(r"github\.com[/:]([^/]+)/[^/]+(?:\.git)?$", remote, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return ""
+
 
 def project_share_pack(space: ProjectSpace) -> str:
     lines = [
         f"Project name: {space.name}",
         f"Workspace mode: {space.mode}",
     ]
+    if space.source_kind:
+        lines.append(f"Source kind: {space.source_kind}")
+    if space.visibility:
+        lines.append(f"Visibility: {space.visibility}")
+    if space.repo_owner:
+        lines.append(f"Repo owner: {space.repo_owner}")
     if space.git_remote:
         lines.append(f"Git remote: {space.git_remote}")
     if space.branch:
@@ -431,5 +466,8 @@ def _normalize_share_pack_key(key: object) -> str:
         "workspace mode": "mode",
         "mode": "mode",
         "source": "source",
+        "source kind": "source_kind",
+        "visibility": "visibility",
+        "repo owner": "repo_owner",
     }
     return aliases.get(clean, clean.replace(" ", "_"))

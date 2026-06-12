@@ -669,8 +669,8 @@ def apply_preview_port_change(project: ProjectSpace, change: dict[str, int]) -> 
 async def on_settings_update(updated_settings: dict) -> None:
     backend = normalize_selected_backend(str(updated_settings.get("agent_backend", "Select")))
     restore_history = bool(updated_settings.get("restore_history", True))
-    project_name = slugify_project_name(str(updated_settings.get("project_name", "") or "default"))
-    current_project = activate_project_space(project_name)
+    current_project = cl.user_session.get("project_space") or initial_project_space()
+    current_project = activate_project_space(current_project.name)
     visible_api_key = clean_secret_input(updated_settings.get("openai_api_key", ""))
     visible_command = clean_command_input(updated_settings.get("codex_command", ""))
     openai_api_key = visible_api_key if backend == CODEX_BACKEND else clean_secret_input(updated_settings.get("openai_api_key", ""))
@@ -1482,6 +1482,15 @@ async def join_project(share_text: str | None = None) -> None:
         return
 
     project = spaces.attach_or_clone_repository(project_name, git_remote, branch)
+    project = spaces.update_profile(
+        project.name,
+        source_kind=normalize_project_source_kind(details.get("source_kind", "") or source_kind_from_remote(git_remote, "git")),
+        visibility=normalize_project_visibility(details.get("visibility", "") or ("private" if git_remote else "local-only")),
+        git_remote=git_remote,
+        repo_owner=details.get("repo_owner", "").strip() or github_owner_from_remote(git_remote),
+        mode="clone",
+        source=git_remote,
+    )
     cl.user_session.set("project_space", project)
     save_preferences({"project_name": project.name})
     chat_state = chat_thread_state()
@@ -1510,6 +1519,7 @@ def activate_project_space(project_name: str, bind_to_active_chat: bool = True) 
         project_id=project.project_id,
         source_kind=project.source_kind,
         visibility=project.visibility,
+        repo_owner=project.repo_owner,
     )
     cl.user_session.set("project_space", project)
     save_preferences({"project_name": project.name})
@@ -1573,6 +1583,14 @@ def source_kind_from_remote(remote_url: str, fallback: str = "git") -> str:
     if "github.com" in normalized:
         return "github"
     return normalize_project_source_kind(fallback or "git")
+
+
+def github_owner_from_remote(remote_url: str) -> str:
+    normalized = (remote_url or "").strip()
+    match = re.search(r"github\.com[/:]([^/]+)/[^/]+(?:\.git)?$", normalized, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return ""
 
 
 def github_cli_path() -> str | None:
@@ -1693,6 +1711,7 @@ async def save_project_profile_from_action(
     source_kind: str,
     visibility: str,
     git_remote: str,
+    repo_owner: str,
     silent: bool = False,
 ) -> None:
     current = cl.user_session.get("project_space")
@@ -1702,9 +1721,13 @@ async def save_project_profile_from_action(
     clean_source_kind = normalize_project_source_kind(source_kind)
     clean_visibility = normalize_project_visibility(visibility)
     clean_remote = git_remote.strip()
+    clean_owner = repo_owner.strip() or github_owner_from_remote(clean_remote)
     if clean_source_kind in {"github", "git"} and not clean_remote:
-        clean_source_kind = "none"
-        if clean_visibility != "public":
+        if clean_source_kind == "github":
+            if clean_visibility != "public":
+                clean_visibility = "private"
+        else:
+            clean_source_kind = "git"
             clean_visibility = "local-only"
     project = spaces.update_profile(
         current.name,
@@ -1712,6 +1735,9 @@ async def save_project_profile_from_action(
         source_kind=clean_source_kind,
         visibility=clean_visibility,
         git_remote=clean_remote or None,
+        repo_owner=clean_owner,
+        mode="repo" if clean_source_kind in {"github", "git"} else current.mode,
+        source=clean_remote or current.source,
     )
     cl.user_session.set("project_space", project)
     save_preferences({"project_name": project.name})
@@ -1727,6 +1753,7 @@ async def save_project_profile_from_action(
                 f"Project ID: `{project.project_id}`  \n"
                 f"Source: `{project.source_kind}`  \n"
                 f"Visibility: `{project.visibility}`  \n"
+                f"Owner / org: `{project.repo_owner or 'not set'}`  \n"
                 f"Remote: `{project.git_remote or 'not set'}`"
             )
         ).send()
@@ -1738,6 +1765,7 @@ async def provision_project_repo_from_action(
     source_kind: str,
     visibility: str,
     git_remote: str,
+    repo_owner: str,
     silent: bool = False,
 ) -> None:
     current = cl.user_session.get("project_space")
@@ -1748,6 +1776,7 @@ async def provision_project_repo_from_action(
     clean_source_kind = normalize_project_source_kind(source_kind)
     clean_visibility = normalize_project_visibility(visibility)
     clean_remote = git_remote.strip()
+    clean_owner = repo_owner.strip() or github_owner_from_remote(clean_remote)
 
     project = activate_project_space(clean_name)
 
@@ -1760,6 +1789,9 @@ async def provision_project_repo_from_action(
             source_kind=final_source_kind,
             visibility=final_visibility,
             git_remote=clean_remote,
+            repo_owner=clean_owner,
+            mode="repo",
+            source=clean_remote,
         )
         cl.user_session.set("project_space", project)
         if not silent:
@@ -1769,7 +1801,33 @@ async def provision_project_repo_from_action(
                     f"Project: `{project.name}`  \n"
                     f"Remote: `{project.git_remote}`  \n"
                     f"Source: `{project.source_kind}`  \n"
-                    f"Visibility: `{project.visibility}`"
+                    f"Visibility: `{project.visibility}`  \n"
+                    f"Owner / org: `{project.repo_owner or 'not set'}`"
+                )
+            ).send()
+        await show_dashboard_sidebar()
+        return
+
+    if clean_source_kind == "git":
+        spaces.ensure_git_repository(project.path)
+        project = spaces.update_profile(
+            project.name,
+            source_kind="git",
+            visibility="local-only",
+            git_remote=None,
+            repo_owner="",
+            mode="repo",
+            source=str(project.path),
+        )
+        cl.user_session.set("project_space", project)
+        if not silent:
+            await cl.Message(
+                content=(
+                    "## Local Git Ready\n\n"
+                    f"Project: `{project.name}`  \n"
+                    f"Folder: `{project.path}`\n\n"
+                    "A local Git repository was initialized for this workspace. "
+                    "Attach a remote later if you want cross-machine repo sync."
                 )
             ).send()
         await show_dashboard_sidebar()
@@ -1778,18 +1836,18 @@ async def provision_project_repo_from_action(
     if clean_source_kind != "github":
         await cl.Message(
             content=(
-                "To publish online from the UI, either paste an existing Git remote URL or choose `github` as the source."
+                "Choose `github` to create a new hosted repo here, or switch to `generic git` to initialize a local repository first."
             )
         ).send()
         await show_dashboard_sidebar()
         return
 
-    owner = github_authenticated_user()
+    owner = clean_owner or github_authenticated_user()
     if not owner:
         await cl.Message(
             content=(
                 "GitHub repo creation needs the local GitHub CLI (`gh`) signed in on this machine.\n\n"
-                "Run `gh auth login`, then retry **Create GitHub repo** from the project card."
+                "Set an explicit owner/org in the project card, or run `gh auth login`, then retry **Create GitHub repo**."
             )
         ).send()
         await show_dashboard_sidebar()
@@ -1803,6 +1861,9 @@ async def provision_project_repo_from_action(
         source_kind="github",
         visibility=final_visibility,
         git_remote=remote_url,
+        repo_owner=owner,
+        mode="repo",
+        source=remote_url,
     )
     cl.user_session.set("project_space", project)
     if not silent:
@@ -1975,13 +2036,6 @@ async def setup_chat_settings(selected_backend: str | None = None) -> None:
         }
     )
     widgets = [
-        TextInput(
-            id="project_name",
-            label="Project Space Name",
-            initial=project_name,
-            placeholder="my-project",
-            tooltip="Creates or selects a writable project folder under the local workspaces directory.",
-        ),
         Select(
             id="agent_backend",
             label="Local Agent",
@@ -2834,6 +2888,7 @@ async def save_project_profile_action(action: cl.Action) -> None:
         str(payload.get("source_kind", "")).strip(),
         str(payload.get("visibility", "")).strip(),
         str(payload.get("git_remote", "")).strip(),
+        str(payload.get("repo_owner", "")).strip(),
         silent=bool(payload.get("silent")),
     )
 
@@ -2846,6 +2901,7 @@ async def provision_project_repo_action(action: cl.Action) -> None:
         str(payload.get("source_kind", "")).strip(),
         str(payload.get("visibility", "")).strip(),
         str(payload.get("git_remote", "")).strip(),
+        str(payload.get("repo_owner", "")).strip(),
         silent=bool(payload.get("silent")),
     )
 
@@ -3208,6 +3264,8 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "mode": project.mode if project else "local",
             "source_kind": project.source_kind if project else "none",
             "visibility": project.visibility if project else "local-only",
+            "repo_owner": project.repo_owner if project else "",
+            "github_default_owner": github_authenticated_user() if github_cli_path() else "",
             "branch": project.branch if project else "",
             "remote": project.git_remote if project else "",
             "share_ready": project_share_ready(project),

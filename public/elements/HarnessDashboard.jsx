@@ -31,6 +31,14 @@ function cleanCurrentUrl() {
   return `${window.location.origin}${window.location.pathname || "/"}`;
 }
 
+function normalizeProjectName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "project";
+}
+
 function clearVisibleChatMessages() {
   document.querySelectorAll("article").forEach((node) => {
     if (!node.closest('[role="dialog"]')) {
@@ -467,6 +475,7 @@ function ProjectSpaceCard({ workspace }) {
   const [draftName, setDraftName] = useState(workspace.name || "default");
   const [sourceKind, setSourceKind] = useState(workspace.source_kind || "none");
   const [visibility, setVisibility] = useState(workspace.visibility || "local-only");
+  const [repoOwner, setRepoOwner] = useState(workspace.repo_owner || workspace.github_default_owner || "");
   const [gitRemote, setGitRemote] = useState(workspace.remote || "");
   const [joinText, setJoinText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -481,6 +490,7 @@ function ProjectSpaceCard({ workspace }) {
     setDraftName(workspace.name || "default");
     setSourceKind(workspace.source_kind || "none");
     setVisibility(workspace.visibility || "local-only");
+    setRepoOwner(workspace.repo_owner || workspace.github_default_owner || "");
     setGitRemote(workspace.remote || "");
   }, [workspace.name]);
 
@@ -503,6 +513,7 @@ function ProjectSpaceCard({ workspace }) {
         source_kind: sourceKind,
         visibility,
         git_remote: gitRemote.trim(),
+        repo_owner: repoOwner.trim(),
         silent: true,
       });
     } catch (error) {
@@ -526,6 +537,7 @@ function ProjectSpaceCard({ workspace }) {
         source_kind: sourceKind,
         visibility,
         git_remote: gitRemote.trim(),
+        repo_owner: repoOwner.trim(),
         silent: true,
       });
     } catch (error) {
@@ -535,11 +547,27 @@ function ProjectSpaceCard({ workspace }) {
     }
   };
 
-  const repoButtonLabel = gitRemote.trim()
-    ? "Attach remote"
+  const cleanName = normalizeProjectName(draftName);
+  const cleanRemote = gitRemote.trim();
+  const cleanOwner = repoOwner.trim();
+  const isDirty =
+    cleanName !== (workspace.name || "default")
+    || sourceKind !== (workspace.source_kind || "none")
+    || visibility !== (workspace.visibility || "local-only")
+    || cleanRemote !== (workspace.remote || "")
+    || cleanOwner !== (workspace.repo_owner || "");
+  const dynamicShareReady = Boolean(cleanRemote);
+  const dynamicShareHint = isDirty
+    ? "Save profile to refresh the project summary and share pack with these latest settings."
+    : (workspace.share_hint || "Back this project with a Git remote to share it across machines.");
+
+  const repoButtonLabel = cleanRemote
+    ? "Init git + attach remote"
     : sourceKind === "github"
       ? "Create GitHub repo"
-      : "Prepare shared repo";
+      : sourceKind === "git"
+        ? "Initialize local git"
+        : "Prepare workspace";
 
   const copySharePack = async () => {
     if (!workspace.share_pack) return;
@@ -626,7 +654,16 @@ function ProjectSpaceCard({ workspace }) {
           placeholder="https://github.com/owner/repo.git"
           onChange={(event) => setGitRemote(event.target.value)}
         />
+        {sourceKind === "github" && (
+          <input
+            className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+            value={repoOwner}
+            placeholder={workspace.github_default_owner ? `owner or org (default: ${workspace.github_default_owner})` : "owner or organization"}
+            onChange={(event) => setRepoOwner(event.target.value)}
+          />
+        )}
         {saveError && <div className="text-[11px] text-destructive">{saveError}</div>}
+        {isDirty && <div className="text-[11px] text-amber-300">Unsaved project changes</div>}
         <Button size="sm" variant="secondary" disabled={isProvisioning} onClick={provisionRepo}>
           <GitBranch className="mr-2 h-3.5 w-3.5" /> {isProvisioning ? "Working" : repoButtonLabel}
         </Button>
@@ -651,23 +688,31 @@ function ProjectSpaceCard({ workspace }) {
         </div>
         <div className="flex min-w-0 justify-between gap-3">
           <span className="text-muted-foreground">Source</span>
-          <strong className="min-w-0 truncate text-right">{workspace.source_kind || "none"}</strong>
+          <strong className="min-w-0 truncate text-right">{sourceKind || "none"}</strong>
         </div>
         <div className="flex min-w-0 justify-between gap-3">
           <span className="text-muted-foreground">Visibility</span>
-          <strong className="min-w-0 truncate text-right">{workspace.visibility || "local-only"}</strong>
+          <strong className="min-w-0 truncate text-right">{visibility || "local-only"}</strong>
         </div>
+        {sourceKind === "github" && (
+          <div className="flex min-w-0 justify-between gap-3">
+            <span className="text-muted-foreground">Owner / org</span>
+            <strong className="min-w-0 max-w-[62%] truncate text-right">
+              {cleanOwner || workspace.github_default_owner || "not set"}
+            </strong>
+          </div>
+        )}
         {workspace.branch && (
           <div className="flex min-w-0 justify-between gap-3">
             <span className="text-muted-foreground">Branch</span>
             <strong className="min-w-0 max-w-[62%] truncate text-right">{workspace.branch}</strong>
           </div>
         )}
-        {workspace.remote && (
+        {cleanRemote && (
           <div className="flex min-w-0 justify-between gap-3">
             <span className="text-muted-foreground">Remote</span>
-            <strong className="min-w-0 max-w-[62%] truncate text-right" title={workspace.remote}>
-              {workspace.remote}
+            <strong className="min-w-0 max-w-[62%] truncate text-right" title={cleanRemote}>
+              {cleanRemote}
             </strong>
           </div>
         )}
@@ -676,16 +721,16 @@ function ProjectSpaceCard({ workspace }) {
       <div className="mt-3 grid gap-2 rounded-md border border-dashed bg-background/40 p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="text-xs font-semibold">Shared repo</div>
-          {workspace.share_ready ? (
+          {dynamicShareReady && !isDirty ? (
             <Badge variant="secondary">ready</Badge>
           ) : (
             <Badge variant="outline">local only</Badge>
           )}
         </div>
         <p className="text-[11px] leading-5 text-muted-foreground">
-          {workspace.share_hint || "Back this project with a Git remote to share it across machines."}
+          {dynamicShareHint}
         </p>
-        {workspace.share_pack ? (
+        {workspace.share_pack && !isDirty ? (
           <>
             <textarea
               readOnly
@@ -947,8 +992,8 @@ export default function HarnessDashboard() {
           <Stat label="Workspace" value={workspace.name || "default"} />
           <Stat label="Coordination" value={overview.coordination_backend || "file"} />
         </div>
-        <ConnectionPanel overview={overview} workspace={workspace} />
         <ProjectSpaceCard workspace={workspace} />
+        <ConnectionPanel overview={overview} workspace={workspace} />
         <ChatSwitcher chats={chats} />
       </section>
 
