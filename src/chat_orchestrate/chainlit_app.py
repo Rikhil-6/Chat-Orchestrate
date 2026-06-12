@@ -500,9 +500,12 @@ async def on_message(message: cl.Message) -> None:
             continue
 
         turns.append(event)
-        progress_items[f"done:{event.agent}:{event.role}"] = f"- `done` {event.agent} finished its `{event.role}` pass."
-        progress_message.content = render_progress(progress_items)
-        await progress_message.update()
+        if not should_hide_turn_completion(event):
+            progress_items[f"done:{event.agent}:{event.role}"] = (
+                f"- `done` {event.agent} finished its `{event.role}` pass."
+            )
+            progress_message.content = render_progress(progress_items)
+            await progress_message.update()
         await show_dashboard_sidebar()
 
     if final_run:
@@ -1086,7 +1089,13 @@ def classify_agent_warning(message: str) -> str:
         return "Local agent started, but its local runtime state was not writable from this process."
     if "unauthorized" in lowered or "invalid admin api key" in lowered or "missing or invalid admin api key" in lowered:
         return "The generated app hit an API authorization/runtime warning during verification."
-    if "export function notfound" in lowered or "export function unauthorized" in lowered or "title: " in lowered:
+    if (
+        "export function notfound" in lowered
+        or "export function unauthorized" in lowered
+        or "title: " in lowered
+        or "throw notfound(" in lowered
+        or "throw unauthorized(" in lowered
+    ):
         return "The generated app logged runtime warnings while the agent was checking its output."
     return ""
 
@@ -1104,8 +1113,17 @@ def should_hide_progress_update(update: ProgressUpdate) -> bool:
         "export function unauthorized",
         "missing or invalid admin api key",
         "invalid admin api key",
+        "throw notfound(",
+        "throw unauthorized(",
     ]
-    return any(marker in lowered for marker in noisy_runtime_markers)
+    if any(marker in lowered for marker in noisy_runtime_markers):
+        return True
+    issue = classify_agent_warning(message)
+    hidden_issue_prefixes = [
+        "The generated app hit an API authorization/runtime warning during verification.",
+        "The generated app logged runtime warnings while the agent was checking its output.",
+    ]
+    return issue in hidden_issue_prefixes
 
 
 async def run_status_call(
@@ -1140,6 +1158,16 @@ async def run_status_call(
 
 
 def progress_key(update: ProgressUpdate) -> str:
+    if update.role == "coordinator" and update.phase in {
+        "intake",
+        "coordinator-check",
+        "routing",
+        "delegation",
+        "assigned",
+        "coordinator-ready",
+        "synthesis",
+    }:
+        return "run:coordinator"
     if update.phase in {"agent-output", "agent-warning", "agent-error"}:
         machine = update.assigned_machine or "local"
         role = update.role or "agent"
@@ -1162,8 +1190,14 @@ def progress_message_fingerprint(message: str) -> str:
 
 
 def render_progress(items: dict[str, str]) -> str:
-    lines = list(items.values())[-10:]
+    lines = list(items.values())[-8:]
     return "## Coordination Status\n\n" + "\n".join(lines)
+
+
+def should_hide_turn_completion(turn) -> bool:
+    agent = str(getattr(turn, "agent", "") or "").strip().lower()
+    role = str(getattr(turn, "role", "") or "").strip().lower()
+    return agent == "coordinator" or role == "planning lead"
 
 
 def is_lightweight_chat(goal: str) -> bool:

@@ -76,6 +76,8 @@ HIDE_STDERR_MARKERS = (
     "export function unauthorized",
     "missing or invalid admin api key",
     "invalid admin api key",
+    "throw notfound(",
+    "throw unauthorized(",
     "objectnotfound: (rg",
     "commandnotfoundexception",
     "fullyqualifiederrorid : commandnotfoundexception",
