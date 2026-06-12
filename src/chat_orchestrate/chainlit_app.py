@@ -157,6 +157,14 @@ async def run_claimed_ui_task(task) -> None:
     await show_dashboard_sidebar()
 
     try:
+        try:
+            coordination.note_task_progress(
+                task.task_id,
+                f"Claimed by `{coordination.machine_id}`. Starting `{task.role}` work: {task.brief or task.title}",
+                status="running",
+            )
+        except CoordinationError:
+            pass
         if settings.use_local_agent_chat and task.preferred_backend != SIMULATED_BACKEND:
             result = await run_claimed_ui_task_live(task, status_message)
         else:
@@ -273,6 +281,12 @@ async def update_worker_status_message(
     if status_message is None:
         return
     status_message.content = worker_task_status_content(task, phase, elapsed, tick, result)
+    if phase == "running":
+        note = result or worker_running_note(task, tick, elapsed)
+        try:
+            coordination.note_task_progress(task.task_id, note[:240], status="running")
+        except CoordinationError:
+            pass
     try:
         await status_message.update()
     except Exception:
@@ -293,18 +307,15 @@ def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0
         f"Backend: `{task.preferred_backend}`",
         f"Project: `{task.project}`",
         f"Task: {task.title}",
+        f"Brief: {task.brief or task.title}",
     ]
     if phase == "assigned":
         lines.append("")
         lines.append("I picked this up from the coordinator and am starting the local agent now.")
+        lines.append("The coordinator expects this machine to own this workstream and report concrete output back.")
     elif phase == "running":
-        activities = [
-            "opening the project workspace",
-            "running the selected local agent",
-            "preparing the handoff result for the coordinator",
-        ]
         lines.append("")
-        lines.append(f"Status: {activities[(tick - 1) % len(activities)]}. Elapsed `{elapsed}s`.")
+        lines.append(f"Status: {worker_running_note(task, tick, elapsed)}")
         if result:
             lines.append("")
             lines.append(f"Latest agent signal: {first_content_line(result)[:360]}")
@@ -320,6 +331,15 @@ def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0
         if result:
             lines.append(f"Error: {result[:240]}")
     return "\n".join(lines)
+
+
+def worker_running_note(task, tick: int, elapsed: int) -> str:
+    activities = [
+        f"Opening the `{task.project}` workspace for `{task.role}` work.",
+        f"Running `{task.preferred_backend}` on the assigned brief: {task.brief or task.title}",
+        "Preparing the handoff result, changed files, and verification notes for the coordinator.",
+    ]
+    return f"{activities[(max(1, tick) - 1) % len(activities)]} Elapsed `{elapsed}s`."
 
 
 def ensure_project_space(name: str) -> ProjectSpace:
@@ -402,6 +422,13 @@ async def on_message(message: cl.Message) -> None:
     maybe_rename_empty_active_chat(text)
     append_chat("user", "You", text)
 
+    status_follow_up = active_run_status_response(text)
+    if status_follow_up:
+        append_chat("assistant", "Assistant", status_follow_up)
+        await cl.Message(content=status_follow_up).send()
+        await show_dashboard_sidebar()
+        return
+
     # Normal chat text is always handed to the selected agent/model path.
     # Dashboard classification and progress are telemetry; slash commands are the control plane.
     cl.user_session.set("last_goal", text)
@@ -483,6 +510,62 @@ async def on_message(message: cl.Message) -> None:
     append_chat("assistant", "Assistant", response)
     await cl.Message(content=response).send()
     await update_cluster_roster()
+
+
+def active_run_status_response(text: str) -> str:
+    run = cl.user_session.get("last_run")
+    if not run:
+        return ""
+    if not looks_like_run_status_prompt(text):
+        return ""
+    tasks = live_response_tasks(run)
+    if not tasks:
+        return ""
+    active = [task for task in tasks if task.status in {"delegated", "running"}]
+    recent = active or tasks[:3]
+    lines = ["Here’s the live assignment status for this run:", ""]
+    for task in recent[:4]:
+        note = task.progress_note or task.brief or task.title
+        lines.append(
+            f"- `{task.role}` on `{task.assigned_machine}` via `{task.preferred_backend}` is `{task.status}`. {note}"
+        )
+    completed = [task for task in tasks if task.status == "completed"]
+    failed = [task for task in tasks if task.status == "failed"]
+    lines.append("")
+    lines.append(
+        f"Summary: `{len(completed)}/{len(tasks)}` completed"
+        + (f", `{len(active)}` active" if active else "")
+        + (f", `{len(failed)}` failed" if failed else "")
+        + "."
+    )
+    return "\n".join(lines)
+
+
+def looks_like_run_status_prompt(text: str) -> bool:
+    clean = " ".join(str(text or "").lower().split())
+    if not clean:
+        return False
+    explicit = [
+        "status",
+        "progress",
+        "update",
+        "assigned",
+        "claimed",
+        "so task",
+        "what task",
+        "what's happening",
+        "whats happening",
+        "still running",
+        "who is doing",
+        "who's doing",
+        "when the task has been assigned",
+        "let me know when the task has been assigned",
+    ]
+    if any(marker in clean for marker in explicit):
+        return True
+    if len(clean) <= 28 and any(term in clean for term in ["task", "assigned", "update", "progress"]):
+        return True
+    return False
 
 
 def recent_chat_context(current_message: str, limit: int = 8) -> str:
@@ -2798,9 +2881,17 @@ def task_dashboard_props(task: DelegatedTask) -> dict:
     return {
         "role": task.role,
         "machine": task.assigned_machine,
+        "original_machine": task.original_machine,
         "backend": task.preferred_backend,
         "status": task.status,
         "title": task.title,
+        "brief": task.brief,
+        "progress_note": task.progress_note,
+        "claimed_by": task.claimed_by,
+        "recovery_count": task.recovery_count,
+        "last_recovered_from": task.last_recovered_from,
+        "completed_by": task.completed_by,
+        "completion_source": task.completion_source,
         "goal": task.goal,
         "task_id": task.task_id,
     }

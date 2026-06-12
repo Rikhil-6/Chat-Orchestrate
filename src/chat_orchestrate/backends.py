@@ -160,6 +160,7 @@ def run_task(
         return (
             f"{task.preferred_backend} worker completed a preview pass for `{task.role}`.\n\n"
             f"Task: {task.title}\n"
+            f"Brief: {task.brief or task.title}\n"
             f"Goal: {task.goal}\n\n"
             "To use a real local agent, select `codex` or `claude-code` in the UI sidebar and make sure "
             "`WORKER_DRY_RUN=false` for worker-only processes."
@@ -201,6 +202,7 @@ def run_task(
     prompt = (
         f"You are the `{task.role}` agent for a distributed project run.\n\n"
         f"Task: {task.title}\n"
+        f"Task brief: {task.brief or task.title}\n"
         f"Project space: {task.project}\n"
         f"{workspace_line}"
         f"{write_contract}"

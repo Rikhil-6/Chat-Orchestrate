@@ -76,6 +76,40 @@ function findScrollParent(node) {
   return document.scrollingElement || document.documentElement;
 }
 
+function taskOwnershipRows(task) {
+  const rows = [];
+  const original = task.original_machine || task.machine || "";
+  if (original) {
+    rows.push({ label: "Original owner", value: original });
+  }
+  if (task.machine) {
+    rows.push({ label: "Current owner", value: task.machine });
+  }
+  if (task.claimed_by) {
+    rows.push({ label: "Claimed by", value: task.claimed_by });
+  }
+  if (task.recovery_count > 0) {
+    rows.push({
+      label: "Recovery",
+      value: `${task.recovery_count} time${task.recovery_count === 1 ? "" : "s"}`
+        + (task.last_recovered_from ? ` from ${task.last_recovered_from}` : ""),
+    });
+  }
+  if (task.completed_by) {
+    rows.push({
+      label: "Completed by",
+      value: `${task.completed_by}${task.completion_source === "replayed" ? " (replayed sync)" : ""}`,
+    });
+  }
+  return rows;
+}
+
+function taskStatusTone(task) {
+  if (task.status === "running") return "default";
+  if (task.status === "completed") return "secondary";
+  return "outline";
+}
+
 function MachineCard({ machine, orchestratorId }) {
   const isOrchestrator = machine.machine_id === orchestratorId;
   const status = machine.status_label || machine.status || "unknown";
@@ -121,15 +155,36 @@ function MachineCard({ machine, orchestratorId }) {
             {assignments.map((task) => (
               <div key={task.task_id || `${task.role}-${task.status}`} className="grid gap-1">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge variant={task.status === "running" ? "default" : "secondary"} className="text-[11px]">
+                  <Badge
+                    variant={taskStatusTone(task)}
+                    className={`text-[11px] ${task.status === "failed" ? "border-destructive/50 text-destructive" : ""}`}
+                  >
                     {task.status}
                   </Badge>
                   <Badge variant="outline" className="text-[11px]">
                     {task.role}
                   </Badge>
                   <span className="text-[11px] text-muted-foreground">via {task.backend}</span>
+                  {task.recovery_count > 0 && (
+                    <Badge variant="outline" className="text-[11px]">
+                      recovered x{task.recovery_count}
+                    </Badge>
+                  )}
                 </div>
-                <div className="truncate text-[11px] text-muted-foreground">{task.title}</div>
+                <div className="line-clamp-2 text-[11px] text-muted-foreground">{task.brief || task.title}</div>
+                {taskOwnershipRows(task).length > 0 && (
+                  <div className="grid gap-1 rounded-md bg-background/60 px-2 py-1.5 text-[11px]">
+                    {taskOwnershipRows(task).map((row) => (
+                      <div key={`${task.task_id}-${row.label}`} className="flex items-start justify-between gap-2">
+                        <span className="text-muted-foreground">{row.label}</span>
+                        <span className="max-w-[60%] text-right text-foreground/85">{row.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {task.progress_note && (
+                  <div className="line-clamp-2 text-[11px] text-foreground/80">{task.progress_note}</div>
+                )}
               </div>
             ))}
           </div>
@@ -857,6 +912,21 @@ export default function HarnessDashboard() {
                     <div className="mt-1 truncate text-[11px] text-muted-foreground">
                       {task.machine} / {task.backend}
                     </div>
+                    {taskOwnershipRows(task).length > 0 && (
+                      <div className="mt-1 grid gap-1 rounded-md bg-background/60 px-2 py-1.5 text-[11px]">
+                        {taskOwnershipRows(task).map((row) => (
+                          <div key={`${task.task_id}-${row.label}`} className="flex items-start justify-between gap-2">
+                            <span className="text-muted-foreground">{row.label}</span>
+                            <span className="max-w-[58%] text-right text-foreground/85">{row.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(task.brief || task.progress_note) && (
+                      <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                        {task.progress_note || task.brief}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

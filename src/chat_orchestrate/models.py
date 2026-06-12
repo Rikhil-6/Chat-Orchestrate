@@ -65,9 +65,16 @@ class DelegatedTask:
     preferred_backend: str
     status: str
     created_at: datetime
+    brief: str = ""
     updated_at: datetime | None = None
+    original_machine: str = ""
     claimed_by: str = ""
     lease_expires_at: datetime | None = None
+    recovery_count: int = 0
+    last_recovered_from: str = ""
+    progress_note: str = ""
+    completed_by: str = ""
+    completion_source: str = ""
     result: str = ""
 
 

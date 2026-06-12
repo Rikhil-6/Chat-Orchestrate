@@ -79,20 +79,51 @@ async def run_worker(settings: Settings | None = None) -> None:
             task.preferred_backend,
         )
         try:
+            coordination.note_task_progress(
+                task.task_id,
+                f"Claimed by `{coordination.machine_id}`. Starting `{task.role}` work: {task.brief or task.title}",
+                status="running",
+            )
+        except Exception:
+            pass
+        try:
             result = await _run_task_with_lease(task, coordination, settings)
         except Exception as exc:  # pragma: no cover - defensive worker boundary
             try:
-                coordination.complete_task(task.task_id, str(exc), status="failed")
+                coordination.complete_task(
+                    task.task_id,
+                    str(exc),
+                    status="failed",
+                    completed_by=coordination.machine_id,
+                    completion_source="direct",
+                )
             except Exception as coordination_exc:
                 LOGGER.warning("could not mark task failed: %s", coordination_exc)
-                _append_pending_result(pending_results_path, task.task_id, str(exc), status="failed")
+                _append_pending_result(
+                    pending_results_path,
+                    task.task_id,
+                    str(exc),
+                    status="failed",
+                    machine_id=coordination.machine_id,
+                )
             LOGGER.exception("task failed task=%s", task.task_id)
         else:
             try:
-                coordination.complete_task(task.task_id, result)
+                coordination.complete_task(
+                    task.task_id,
+                    result,
+                    completed_by=coordination.machine_id,
+                    completion_source="direct",
+                )
             except Exception as exc:
                 LOGGER.warning("completed task locally but could not report result: %s", exc)
-                _append_pending_result(pending_results_path, task.task_id, result, status="completed")
+                _append_pending_result(
+                    pending_results_path,
+                    task.task_id,
+                    result,
+                    status="completed",
+                    machine_id=coordination.machine_id,
+                )
             else:
                 LOGGER.info("completed task=%s", task.task_id)
 
@@ -117,13 +148,26 @@ async def _run_task_with_lease(task, coordination: CoordinationManager, settings
         )
     )
     heartbeat_interval = max(2.0, min(settings.worker_poll_seconds, 8.0))
+    tick = 0
     while not runner.done():
         try:
             coordination.renew_task_lease(task.task_id)
+            tick += 1
+            note = _worker_progress_note(task, tick)
+            coordination.note_task_progress(task.task_id, note, status="running")
         except CoordinationError as exc:
             LOGGER.warning("could not renew task lease for %s: %s", task.task_id, exc)
         await asyncio.sleep(heartbeat_interval)
     return await runner
+
+
+def _worker_progress_note(task, tick: int) -> str:
+    steps = [
+        f"Opening the `{task.project}` workspace for `{task.role}` work.",
+        f"Running `{task.preferred_backend}` on the assigned brief: {task.brief or task.title}",
+        "Collecting files changed, verification notes, and coordinator handoff details.",
+    ]
+    return steps[(max(1, tick) - 1) % len(steps)]
 
 
 def _pending_results_path(settings: Settings, machine_id: str) -> Path:
@@ -131,9 +175,9 @@ def _pending_results_path(settings: Settings, machine_id: str) -> Path:
     return settings.coordination_state_path.resolve().parent / f".pending-results-{name}.jsonl"
 
 
-def _append_pending_result(path: Path, task_id: str, result: str, status: str) -> None:
+def _append_pending_result(path: Path, task_id: str, result: str, status: str, machine_id: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"task_id": task_id, "result": result, "status": status}
+    payload = {"task_id": task_id, "result": result, "status": status, "machine_id": machine_id}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload) + "\n")
 
@@ -147,10 +191,17 @@ def _flush_pending_results(coordination: CoordinationManager, path: Path) -> Non
         task_id = str(item.get("task_id", "")).strip()
         status = str(item.get("status", "completed")).strip() or "completed"
         result = str(item.get("result", ""))
+        machine_id = str(item.get("machine_id", "")).strip()
         if not task_id:
             continue
         try:
-            coordination.complete_task(task_id, result, status=status)
+            coordination.complete_task(
+                task_id,
+                result,
+                status=status,
+                completed_by=machine_id or coordination.machine_id,
+                completion_source="replayed",
+            )
         except Exception:
             remaining.append(item)
     _write_pending_results(path, remaining)

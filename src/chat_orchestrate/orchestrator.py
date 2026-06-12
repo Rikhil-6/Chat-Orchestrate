@@ -110,7 +110,7 @@ class Orchestrator:
                 assigned_machine=orchestrator_node.machine_id,
             )
             machines = self.coordination.list_machines()
-            machine_preferences, planned_roles = await self._reasoned_machine_preferences(
+            machine_preferences, planned_roles, task_briefs = await self._reasoned_machine_preferences(
                 goal,
                 project,
                 fallback_roles,
@@ -123,6 +123,7 @@ class Orchestrator:
                 goal,
                 machine_preferences=machine_preferences,
                 roles=roles,
+                task_briefs=task_briefs,
             )
             self._add_delegated_agents(run)
             delegation_context = self._delegation_context(run)
@@ -298,9 +299,9 @@ class Orchestrator:
         project: ProjectSpace,
         roles: list[str],
         machines: list[MachineNode],
-    ) -> tuple[dict[str, str], list[str]]:
+    ) -> tuple[dict[str, str], list[str], dict[str, str]]:
         if not machines:
-            return {}, roles
+            return {}, roles, {}
         machine_payload = [
             {
                 "machine_id": machine.machine_id,
@@ -317,7 +318,7 @@ class Orchestrator:
         prompt = (
             "Return only compact JSON. Do not include markdown.\n"
             "Schema: {\"roles\":[\"coordinator\",\"backend\"],"
-            "\"assignments\":[{\"role\":\"backend\",\"machine_id\":\"exact-live-machine-id\",\"reason\":\"short reason\"}]}\n\n"
+            "\"assignments\":[{\"role\":\"backend\",\"machine_id\":\"exact-live-machine-id\",\"reason\":\"short reason\",\"task_brief\":\"one concrete sentence about what this machine should do\"}]}\n\n"
             "Rules:\n"
             "- You, the coordinator agent, must infer the roles needed from the user's intent; use only these allowed role names: "
             "coordinator, researcher, engineer, backend, frontend, reviewer, documenter.\n"
@@ -339,7 +340,7 @@ class Orchestrator:
         try:
             output = await self.client.run_agent(ROUTING_PLANNER, project, goal, prompt)
         except Exception:
-            return {}, roles
+            return {}, roles, {}
         return self._parse_machine_plan(output, machines, roles)
 
     def _parse_machine_plan(
@@ -347,12 +348,13 @@ class Orchestrator:
         output: str,
         machines: list[MachineNode],
         fallback_roles: list[str],
-    ) -> tuple[dict[str, str], list[str]]:
+    ) -> tuple[dict[str, str], list[str], dict[str, str]]:
         payload = self._extract_json_object(output)
         if not payload:
-            return {}, list(fallback_roles)
+            return {}, list(fallback_roles), {}
         assignments = payload.get("assignments", [])
         preferences: dict[str, str] = {}
+        briefs: dict[str, str] = {}
         allowed_roles = {"coordinator", "researcher", "engineer", "backend", "frontend", "reviewer", "documenter"}
         planned_roles = [
             str(role).strip().lower()
@@ -367,7 +369,7 @@ class Orchestrator:
             planned_roles = [role for role in planned_roles if role != "engineer"]
         if not isinstance(assignments, list):
             model_roles = self._unique_roles(["coordinator", *planned_roles])
-            return preferences, model_roles if len(model_roles) > 1 else list(fallback_roles)
+            return preferences, model_roles if len(model_roles) > 1 else list(fallback_roles), briefs
         for item in assignments:
             if not isinstance(item, dict):
                 continue
@@ -392,8 +394,11 @@ class Orchestrator:
             if exact_machine:
                 preferences[role] = exact_machine
                 planned_roles.append(role)
+                brief = " ".join(str(item.get("task_brief", "")).split()).strip()
+                if brief:
+                    briefs[role] = brief[:220]
         model_roles = self._unique_roles(["coordinator", *planned_roles])
-        return preferences, model_roles if len(model_roles) > 1 else list(fallback_roles)
+        return preferences, model_roles if len(model_roles) > 1 else list(fallback_roles), briefs
 
     def _resolve_machine_reference(self, reference: str, machines: list[MachineNode]) -> str:
         clean = str(reference or "").strip()
@@ -482,6 +487,7 @@ class Orchestrator:
         for task in run.delegated_tasks:
             assignments.append(
                 f"{task.role} -> `{task.assigned_machine}` via `{task.preferred_backend}`"
+                + (f" ({task.brief})" if task.brief else "")
             )
         source = "coordinator-agent routing" if machine_preferences else "scheduler fallback"
         return f"Delegation is set from {source}: " + "; ".join(assignments[:6])
@@ -503,12 +509,12 @@ class Orchestrator:
         if self.coordination is not None and task.assigned_machine != self.coordination.machine_id:
             message = (
                 f"{agent.name} is assigned to `{task.assigned_machine}` as `{task.role}` "
-                f"using `{task.preferred_backend}`. Waiting for that machine to report back."
+                f"using `{task.preferred_backend}`. Brief: {task.brief or task.title}"
             )
         else:
             message = (
                 f"{agent.name} is running here as `{task.role}` using `{task.preferred_backend}`. "
-                "It knows this is its slice of the orchestrated project run."
+                f"Its brief is: {task.brief or task.title}"
             )
         return ProgressUpdate(
             message=message,
@@ -547,13 +553,20 @@ class Orchestrator:
                 activity = "Remote worker finished; collecting the returned result."
             elif status == "delegated":
                 activity = "Task is delegated but has not been claimed yet; checking worker availability."
+            detail = ""
+            if observed_task and observed_task.progress_note:
+                detail = f" Latest worker note: {observed_task.progress_note}"
+            elif task.brief:
+                detail = f" Brief: {task.brief}"
             message = (
                 f"{activity} Status `{status}` on `{task.assigned_machine}` for `{task.role}` "
-                f"via `{task.preferred_backend}`. Elapsed: {elapsed}s."
+                f"via `{task.preferred_backend}`.{detail} Elapsed: {elapsed}s."
             )
         else:
             message = (
                 f"{agent.name}: {activity} Role `{task.role}` is running via `{task.preferred_backend}`. "
+                + (f" Brief: {task.brief}." if task.brief else "")
+                + " "
                 f"Elapsed: {elapsed}s."
             )
         return ProgressUpdate(
@@ -630,9 +643,12 @@ class Orchestrator:
         if completed and completed.result:
             return f"`{completed.preferred_backend}` result from `{completed.assigned_machine}`\n\n{completed.result}"
         status = completed.status if completed else task.status
+        note = completed.progress_note if completed and completed.progress_note else task.progress_note
+        detail = f"\n\nWorker note: {note}" if note else (f"\n\nBrief: {task.brief}" if task.brief else "")
         return (
             f"`{agent.name}` is handed off to `{task.assigned_machine}` via `{task.preferred_backend}`. "
             f"Current status is `{status}`; that machine will keep working and report back through the dashboard."
+            f"{detail}"
         )
 
     async def _run_or_wait_for_agent_events(
@@ -778,6 +794,7 @@ class Orchestrator:
         assignments = "\n".join(
             f"- {task.role}: {task.title} -> {task.assigned_machine}"
             f" ({task.preferred_backend})"
+            + (f" | {task.brief}" if task.brief else "")
             for task in run.delegated_tasks
         )
         return (
@@ -791,7 +808,7 @@ class Orchestrator:
             return ""
         assignments = "\n".join(
             f"- `{task.assigned_machine}` via `{task.preferred_backend}`: "
-            f"**{task.role}** - {task.title}"
+            f"**{task.role}** - {task.brief or task.title}"
             for task in run.delegated_tasks
         )
         return f"### Delegation Plan\n{assignments}\n\n"

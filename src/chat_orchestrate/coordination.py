@@ -135,6 +135,7 @@ class CoordinationManager:
         goal: str,
         machine_preferences: dict[str, str] | None = None,
         roles: list[str] | None = None,
+        task_briefs: dict[str, str] | None = None,
     ) -> list[DelegatedTask]:
         with self._state_lock():
             state = self._load()
@@ -157,6 +158,7 @@ class CoordinationManager:
             for role in roles or self._roles_for_goal(goal):
                 machine = self._best_machine_for_role(machines, role, goal, (machine_preferences or {}).get(role, ""))
                 preferred_backend = self._preferred_backend_for_role(machine, role, goal)
+                brief = self._task_brief(role, goal, (task_briefs or {}).get(role, ""))
                 tasks.append(
                     DelegatedTask(
                         task_id=uuid4().hex,
@@ -164,12 +166,14 @@ class CoordinationManager:
                         project=project.name,
                         goal=goal,
                         role=role,
-                        title=self._task_title(role, goal),
+                        title=self._task_title(role, goal, brief),
                         assigned_machine=machine.machine_id,
                         preferred_backend=preferred_backend,
                         status="delegated",
                         created_at=now,
+                        brief=brief,
                         updated_at=now,
+                        original_machine=machine.machine_id,
                     )
                 )
 
@@ -204,10 +208,33 @@ class CoordinationManager:
                 item["status"] = "running"
                 item["claimed_by"] = self.machine_id
                 item["lease_expires_at"] = (now + self.task_lease).isoformat()
+                item["original_machine"] = str(item.get("original_machine", "")).strip() or item["assigned_machine"]
+                item["progress_note"] = (
+                    item.get("progress_note")
+                    or f"Task claimed by `{self.machine_id}`; local agent is opening the workspace."
+                )
                 item["updated_at"] = now.isoformat()
                 self._save(state)
                 return self._task_from_json(item)
             return None
+
+    def note_task_progress(self, task_id: str, note: str, status: str | None = None) -> bool:
+        with self._state_lock():
+            state = self._load()
+            now = datetime.now(UTC)
+            for item in state["tasks"]:
+                if item["task_id"] != task_id:
+                    continue
+                if status:
+                    item["status"] = status
+                item["claimed_by"] = self.machine_id
+                item["progress_note"] = str(note or "").strip()
+                if item.get("status") == "running":
+                    item["lease_expires_at"] = (now + self.task_lease).isoformat()
+                item["updated_at"] = now.isoformat()
+                self._save(state)
+                return True
+            return False
 
     def renew_task_lease(self, task_id: str) -> bool:
         with self._state_lock():
@@ -223,12 +250,22 @@ class CoordinationManager:
                     return False
                 item["claimed_by"] = self.machine_id
                 item["lease_expires_at"] = (now + self.task_lease).isoformat()
+                if not item.get("progress_note"):
+                    item["progress_note"] = f"Task is still running on `{self.machine_id}`."
                 item["updated_at"] = now.isoformat()
                 self._save(state)
                 return True
             return False
 
-    def complete_task(self, task_id: str, result: str, status: str = "completed") -> None:
+    def complete_task(
+        self,
+        task_id: str,
+        result: str,
+        status: str = "completed",
+        *,
+        completed_by: str = "",
+        completion_source: str = "direct",
+    ) -> None:
         with self._state_lock():
             state = self._load()
             now = self._now_text()
@@ -238,6 +275,9 @@ class CoordinationManager:
                     item["result"] = result
                     item["claimed_by"] = ""
                     item["lease_expires_at"] = None
+                    item["progress_note"] = ""
+                    item["completed_by"] = (completed_by or self.machine_id).strip()
+                    item["completion_source"] = (completion_source or "direct").strip()
                     item["updated_at"] = now
                     break
             self._save(state)
@@ -263,9 +303,15 @@ class CoordinationManager:
                 target_machine = self._best_machine_for_role(candidates, role, goal).machine_id
 
             item["status"] = "delegated"
+            item["original_machine"] = str(item.get("original_machine", "")).strip() or assigned_machine
             item["assigned_machine"] = target_machine
             item["claimed_by"] = ""
             item["lease_expires_at"] = None
+            item["recovery_count"] = int(item.get("recovery_count", 0) or 0) + 1
+            item["last_recovered_from"] = assigned_machine
+            item["progress_note"] = (
+                f"Lease expired on `{assigned_machine or 'unknown'}`; task is queued again for `{target_machine}`."
+            )
             item["updated_at"] = now.isoformat()
             changed = True
 
@@ -447,9 +493,25 @@ class CoordinationManager:
             return machine.agent_backends[0]
         return SIMULATED_BACKEND
 
-    def _task_title(self, role: str, goal: str) -> str:
-        short_goal = goal.strip().splitlines()[0][:80]
+    def _task_title(self, role: str, goal: str, brief: str = "") -> str:
+        short_goal = (brief or goal).strip().splitlines()[0][:96]
         return f"{role.title()} pass: {short_goal}"
+
+    def _task_brief(self, role: str, goal: str, brief: str = "") -> str:
+        clean = " ".join(str(brief or "").split()).strip()
+        if clean:
+            return clean[:220]
+        role_labels = {
+            "coordinator": "Own orchestration, confirm assignments, and merge returned work.",
+            "frontend": "Build the browser-facing UI, interaction flow, and visual polish for this goal.",
+            "backend": "Build the API, server logic, data layer, and integration points for this goal.",
+            "engineer": "Handle concrete implementation work and code-level changes needed for this goal.",
+            "reviewer": "Review the current solution for bugs, regressions, and missing validation.",
+            "documenter": "Write the handoff notes, README updates, and implementation summary.",
+            "researcher": "Inspect constraints, references, and unknowns that affect implementation.",
+        }
+        goal_hint = " ".join(str(goal or "").strip().split())[:140]
+        return f"{role_labels.get(role, 'Handle this assigned workstream.')}" + (f" Goal focus: {goal_hint}" if goal_hint else "")
 
     def _active_orchestrator_id(self, state: dict, now: datetime) -> str | None:
         orchestrator_id = state.get("orchestrator_machine")
@@ -693,13 +755,20 @@ class CoordinationManager:
             goal=item["goal"],
             role=item["role"],
             title=item["title"],
+            brief=item.get("brief", ""),
             assigned_machine=item["assigned_machine"],
             preferred_backend=item.get("preferred_backend", SIMULATED_BACKEND),
             status=item["status"],
             created_at=datetime.fromisoformat(item["created_at"]),
             updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else None,
+            original_machine=item.get("original_machine", ""),
             claimed_by=item.get("claimed_by", ""),
             lease_expires_at=datetime.fromisoformat(item["lease_expires_at"]) if item.get("lease_expires_at") else None,
+            recovery_count=int(item.get("recovery_count", 0) or 0),
+            last_recovered_from=item.get("last_recovered_from", ""),
+            progress_note=item.get("progress_note", ""),
+            completed_by=item.get("completed_by", ""),
+            completion_source=item.get("completion_source", ""),
             result=item.get("result", ""),
         )
 

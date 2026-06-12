@@ -436,3 +436,34 @@ def test_expired_task_reassigns_when_original_machine_is_offline(tmp_path: Path)
     assert reclaimed is not None
     assert reclaimed.assigned_machine == "host-a"
     assert reclaimed.status == "running"
+    assert reclaimed.original_machine == "worker-b"
+    assert reclaimed.last_recovered_from == "worker-b"
+    assert reclaimed.recovery_count == 1
+
+
+def test_task_progress_note_round_trip(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    manager = CoordinationManager(
+        state,
+        "machine-a",
+        ["frontend"],
+        ["codex"],
+    )
+    manager.heartbeat()
+    tasks = manager.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "build a frontend site",
+        roles=["frontend"],
+        task_briefs={"frontend": "Build the browser UI on this machine."},
+    )
+    assert tasks
+    claimed = manager.claim_next_task()
+    assert claimed is not None
+
+    manager.note_task_progress(claimed.task_id, "Worker is wiring the UI shell.", status="running")
+    current = manager.get_task(claimed.task_id)
+
+    assert current is not None
+    assert current.brief == "Build the browser UI on this machine."
+    assert current.progress_note == "Worker is wiring the UI shell."

@@ -17,8 +17,10 @@ class FakeRoutingClient(SwarmClient):
         if agent.name == "Routing Planner":
             return (
                 '{"assignments":['
-                '{"role":"backend","machine_id":"desktop-p4k08ab","reason":"user assigned backend to that machine"},'
-                '{"role":"frontend","machine_id":"sg-akc-dt330","reason":"user assigned frontend to this machine"}'
+                '{"role":"backend","machine_id":"desktop-p4k08ab","reason":"user assigned backend to that machine",'
+                '"task_brief":"Build the data plumbing, API layer, and persistence on the remote machine."},'
+                '{"role":"frontend","machine_id":"sg-akc-dt330","reason":"user assigned frontend to this machine",'
+                '"task_brief":"Build the browser UI and interaction layer on this machine."}'
                 ']}'
             )
         return f"{agent.name} handled {goal} in {project.name}"
@@ -132,6 +134,8 @@ async def test_orchestrator_uses_reasoned_routing_assignments(tmp_path: Path) ->
 
     assert by_role["backend"].assigned_machine == "desktop-p4k08ab"
     assert by_role["frontend"].assigned_machine == "sg-akc-dt330"
+    assert "data plumbing" in by_role["backend"].brief.lower()
+    assert "browser ui" in by_role["frontend"].brief.lower()
 
 
 @pytest.mark.asyncio

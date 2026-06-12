@@ -17,16 +17,29 @@ class _RecorderCoordination:
     def __init__(self, fail_complete: bool = False) -> None:
         self.renew_count = 0
         self.completed: list[tuple[str, str, str]] = []
+        self.completion_meta: list[tuple[str, str]] = []
         self.fail_complete = fail_complete
 
     def renew_task_lease(self, task_id: str) -> bool:  # noqa: ARG002
         self.renew_count += 1
         return True
 
-    def complete_task(self, task_id: str, result: str, status: str = "completed") -> None:
+    def note_task_progress(self, task_id: str, note: str, status: str | None = None) -> bool:  # noqa: ARG002
+        return True
+
+    def complete_task(
+        self,
+        task_id: str,
+        result: str,
+        status: str = "completed",
+        *,
+        completed_by: str = "",
+        completion_source: str = "direct",
+    ) -> None:
         if self.fail_complete:
             raise CoordinationError("down")
         self.completed.append((task_id, status, result))
+        self.completion_meta.append((completed_by, completion_source))
 
 
 def _sample_task() -> DelegatedTask:
@@ -48,20 +61,21 @@ def _sample_task() -> DelegatedTask:
 
 def test_pending_results_replay_clears_queue(tmp_path: Path) -> None:
     path = tmp_path / ".pending-results.jsonl"
-    _append_pending_result(path, "task-1", "done", "completed")
-    _append_pending_result(path, "task-2", "boom", "failed")
+    _append_pending_result(path, "task-1", "done", "completed", machine_id="machine-a")
+    _append_pending_result(path, "task-2", "boom", "failed", machine_id="machine-a")
     assert len(_read_pending_results(path)) == 2
 
     recorder = _RecorderCoordination()
     _flush_pending_results(recorder, path)
 
     assert recorder.completed == [("task-1", "completed", "done"), ("task-2", "failed", "boom")]
+    assert recorder.completion_meta == [("machine-a", "replayed"), ("machine-a", "replayed")]
     assert not path.exists()
 
 
 def test_pending_results_replay_keeps_queue_when_unreachable(tmp_path: Path) -> None:
     path = tmp_path / ".pending-results.jsonl"
-    _append_pending_result(path, "task-1", "done", "completed")
+    _append_pending_result(path, "task-1", "done", "completed", machine_id="machine-a")
     recorder = _RecorderCoordination(fail_complete=True)
 
     _flush_pending_results(recorder, path)
