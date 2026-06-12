@@ -98,8 +98,9 @@
     if (!document.body) return;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
-      if (walker.currentNode.nodeValue.trim() === "HarnessDashboard") {
-        walker.currentNode.nodeValue = walker.currentNode.nodeValue.replace("HarnessDashboard", "Harness Dashboard");
+      const value = walker.currentNode.nodeValue.trim();
+      if (value === "HarnessDashboard" || value === "HarnessDashboardV2") {
+        walker.currentNode.nodeValue = walker.currentNode.nodeValue.replace(value, "Harness Dashboard");
       }
     }
   }

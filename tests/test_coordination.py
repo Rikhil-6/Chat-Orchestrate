@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 from chat_orchestrate.backends import (
     CLAUDE_CODE_BACKEND,
@@ -363,3 +365,74 @@ def test_corrupt_state_with_extra_json_is_salvaged(tmp_path: Path) -> None:
     assert manager.list_machines()[0].machine_id == "machine-a"
     assert not state.read_text(encoding="utf-8").strip().endswith('],"cluster_id":"local"}')
     assert list(tmp_path.glob("coordination.corrupt-*.json"))
+
+
+def test_expired_running_task_is_reclaimed_for_same_machine(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    manager = CoordinationManager(
+        state,
+        "machine-a",
+        ["engineer"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    manager.heartbeat()
+    manager.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "build the feature with codex",
+    )
+    task = manager.claim_next_task()
+    assert task is not None
+
+    data = state.read_text(encoding="utf-8")
+    payload = json.loads(data)
+    payload["tasks"][0]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    state.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    reclaimed = manager.claim_next_task()
+    assert reclaimed is not None
+    assert reclaimed.task_id == task.task_id
+    assert reclaimed.status == "running"
+    assert reclaimed.claimed_by == "machine-a"
+
+
+def test_expired_task_reassigns_when_original_machine_is_offline(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    host = CoordinationManager(
+        state,
+        "host-a",
+        ["coordinator", "backend"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    worker = CoordinationManager(
+        state,
+        "worker-b",
+        ["backend"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    host.heartbeat()
+    worker.heartbeat()
+    tasks = host.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "backend implementation",
+        roles=["backend"],
+    )
+    assert tasks
+
+    worker_task = worker.claim_next_task()
+    assert worker_task is not None
+
+    payload = json.loads(state.read_text(encoding="utf-8"))
+    stale = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+    payload["machines"]["worker-b"]["last_seen"] = stale
+    payload["tasks"][0]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    state.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    reclaimed = host.claim_next_task()
+    assert reclaimed is not None
+    assert reclaimed.assigned_machine == "host-a"
+    assert reclaimed.status == "running"

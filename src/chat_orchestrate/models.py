@@ -66,6 +66,8 @@ class DelegatedTask:
     status: str
     created_at: datetime
     updated_at: datetime | None = None
+    claimed_by: str = ""
+    lease_expires_at: datetime | None = None
     result: str = ""
 
 
@@ -76,6 +78,7 @@ class OrchestrationRun:
     run_id: str = field(default_factory=lambda: uuid4().hex)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     orchestrator_machine: str | None = None
+    goal_summary: str = ""
     delegated_tasks: list[DelegatedTask] = field(default_factory=list)
     turns: list[AgentTurn] = field(default_factory=list)
     final: str = ""

@@ -85,10 +85,10 @@ def summarize_assignments(tasks: Iterable[object]) -> str:
 def clean_goal_text(goal: str) -> str:
     clean = re.sub(r"\s+", " ", str(goal or "")).strip(" -")
     leading_patterns = [
-        r"^(?:orite|alright|right-o|right|ok|okay|so|again|then|yo|hey|m8|mate|pls|please)\b[\s>:,-]*",
+        r"^(?:orite|alright|right-o|right|ok|okay|so|again|then|yo|hey|m8|mate|pls|please)\b[\s>:,;-]*",
         r"^>{1,3}\s*",
         r"^(?:task|plan|goal)\s+is\s+to\s+",
-        r"^(?:i\s+want(?:na)?|i\s+need|let'?s)\s+(?:to\s+)?",
+        r"^(?:i\s+want(?:na)?|i\s+wanna|i\s+need|let'?s)\s+(?:to\s+)?",
     ]
     previous = None
     while previous != clean:

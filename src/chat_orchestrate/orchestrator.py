@@ -162,6 +162,7 @@ class Orchestrator:
                 run.turns.append(turn)
                 context = self._append_context(context, turn)
 
+        run.goal_summary = await self.client.summarize_goal(run.goal, project, run.delegated_tasks, run.turns)
         run.final = self._summarize(run)
         yield ProgressUpdate(
             message="The run has enough agent output to answer; preparing the conversational summary.",

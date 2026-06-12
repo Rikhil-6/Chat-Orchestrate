@@ -92,6 +92,7 @@ coordination = CoordinationManager(
     settings.coordination_backend,
     settings.coordination_http_url,
     settings.coordination_http_urls,
+    settings.task_lease_seconds,
 )
 coordinator_process: subprocess.Popen | None = None
 hosted_connection: dict[str, str] = {}
@@ -2575,7 +2576,7 @@ async def show_dashboard_sidebar(
     await cl.ElementSidebar.set_elements(
         [
             cl.CustomElement(
-                name="HarnessDashboard",
+                name="HarnessDashboardV2",
                 display="side",
                 props=dashboard_props(machines, orchestrator_id),
             )
@@ -2758,7 +2759,7 @@ def dashboard_run_props(
     return {
         "run_id": run_id,
         "goal": goal,
-        "goal_summary": summarize_goal(goal, run_tasks),
+        "goal_summary": getattr(run, "goal_summary", "") or summarize_goal(goal, run_tasks),
         "orchestrator_machine": getattr(run, "orchestrator_machine", ""),
         "turns": [
             {

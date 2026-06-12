@@ -32,7 +32,8 @@ from .backends import (
     task_command_args,
 )
 from .config import Settings
-from .models import AgentSpec, ProgressUpdate, ProjectSpace
+from .models import AgentSpec, AgentTurn, DelegatedTask, ProgressUpdate, ProjectSpace
+from .summaries import summarize_goal as fallback_summarize_goal
 from .scaffold import scaffold_project, should_scaffold
 
 
@@ -92,9 +93,25 @@ def workspace_write_contract(project: ProjectSpace) -> str:
     )
 
 
+def trim_summary_line(value: str, limit: int = 180) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return f"{clean[: limit - 1]}..."
+
+
 class SwarmClient:
     async def run_agent(self, agent: AgentSpec, project: ProjectSpace, goal: str, context: str) -> str:
         raise NotImplementedError
+
+    async def summarize_goal(
+        self,
+        goal: str,
+        project: ProjectSpace,
+        tasks: list[DelegatedTask] | None = None,
+        turns: list[AgentTurn] | None = None,
+    ) -> str:
+        return fallback_summarize_goal(goal, tasks or [])
 
     async def run_agent_events(
         self,
@@ -147,6 +164,56 @@ class OpenSwarmClient(SwarmClient):
 
         return payload["choices"][0]["message"]["content"].strip()
 
+    async def summarize_goal(
+        self,
+        goal: str,
+        project: ProjectSpace,
+        tasks: list[DelegatedTask] | None = None,
+        turns: list[AgentTurn] | None = None,
+    ) -> str:
+        task_lines = "\n".join(
+            f"- {task.role}: {task.assigned_machine} via {task.preferred_backend} ({task.status})"
+            for task in (tasks or [])
+            if task.role and task.assigned_machine
+        )
+        turn_lines = "\n".join(
+            f"- {turn.agent} / {turn.role}: {trim_summary_line(turn.content)}"
+            for turn in (turns or [])[-4:]
+            if turn.content.strip()
+        )
+        prompt = (
+            "Write one short dashboard summary for a distributed coding run.\n"
+            "Keep it plain language, concrete, and under 120 characters if possible.\n"
+            "Do not use bullets, headings, JSON, or template wording.\n\n"
+            f"Project: {project.name}\n"
+            f"Goal: {goal}\n"
+            f"Assignments:\n{task_lines or '- none'}\n"
+            f"Recent turns:\n{turn_lines or '- none'}\n"
+        )
+
+        headers = {}
+        if self.settings.open_swarm_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.open_swarm_api_key}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.open_swarm_timeout_seconds) as client:
+                response = await client.post(
+                    f"{self.settings.open_swarm_base_url.rstrip('/')}/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": self.settings.open_swarm_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError:
+            return fallback_summarize_goal(goal, tasks or [])
+
+        summary = payload["choices"][0]["message"]["content"].strip()
+        return summary or fallback_summarize_goal(goal, tasks or [])
+
 
 class LocalPreviewSwarmClient(SwarmClient):
     """Deterministic fallback for UI and workflow testing without external services."""
@@ -193,6 +260,15 @@ class LocalPreviewSwarmClient(SwarmClient):
             f"- Recommended next move: run the preview command and reconnect a real local CLI for deeper edits."
         )
 
+    async def summarize_goal(
+        self,
+        goal: str,
+        project: ProjectSpace,
+        tasks: list[DelegatedTask] | None = None,
+        turns: list[AgentTurn] | None = None,
+    ) -> str:
+        return fallback_summarize_goal(goal, tasks or [])
+
 
 class LocalAgentCliClient(SwarmClient):
     """Routes chat turns through locally installed agent CLIs when available."""
@@ -236,6 +312,20 @@ class LocalAgentCliClient(SwarmClient):
             if isinstance(event, str):
                 final = event
         return final
+
+    async def summarize_goal(
+        self,
+        goal: str,
+        project: ProjectSpace,
+        tasks: list[DelegatedTask] | None = None,
+        turns: list[AgentTurn] | None = None,
+    ) -> str:
+        prompt = self._summary_prompt(goal, project, tasks or [], turns or [])
+        for backend in self._ordered_backends():
+            summary = await self._run_summary_backend(backend, prompt, project)
+            if summary:
+                return self._normalize_summary(summary, goal, tasks or [])
+        return fallback_summarize_goal(goal, tasks or [])
 
     async def run_agent_events(
         self,
@@ -364,6 +454,35 @@ class LocalAgentCliClient(SwarmClient):
             f"Context from prior agents:\n{context or 'No prior context.'}"
         )
 
+    def _summary_prompt(
+        self,
+        goal: str,
+        project: ProjectSpace,
+        tasks: list[DelegatedTask],
+        turns: list[AgentTurn],
+    ) -> str:
+        task_lines = "\n".join(
+            f"- {task.role}: {task.assigned_machine} via {task.preferred_backend} ({task.status})"
+            for task in tasks
+            if task.role and task.assigned_machine
+        )
+        turn_lines = "\n".join(
+            f"- {turn.agent} / {turn.role}: {self._trim_summary_line(turn.content)}"
+            for turn in turns[-4:]
+            if turn.content.strip()
+        )
+        return (
+            "You are a concise run-summary writer for a distributed coding dashboard.\n"
+            "Return exactly one short sentence or sentence fragment suitable for a sidebar card.\n"
+            "Do not use bullets, headings, JSON, code fences, or generic coordination wording.\n"
+            "Focus on the actual task, the project, and the most relevant assignments.\n\n"
+            f"Project: {project.name}\n"
+            f"Path: {project.path}\n"
+            f"Goal: {goal}\n"
+            f"Assignments:\n{task_lines or '- none'}\n"
+            f"Recent turns:\n{turn_lines or '- none'}\n"
+        )
+
     def _ordered_backends(self) -> list[str]:
         if self.preferred_backend != "auto":
             return [self.preferred_backend, *[backend for backend in self.backends if backend != self.preferred_backend]]
@@ -376,6 +495,45 @@ class LocalAgentCliClient(SwarmClient):
             if isinstance(event, str):
                 final = event
         return final
+
+    async def _run_summary_backend(self, backend: str, prompt: str, project: ProjectSpace) -> str:
+        command = self._command_for_backend(backend)
+        if command is None:
+            api_key = self._backend_api_key(backend)
+            if api_key and backend_supports_api_fallback(backend):
+                return await self._run_backend_api_fallback(backend, prompt, project)
+            return ""
+        workspace_path = project.path.resolve() if project.path.exists() and project.path.is_dir() else None
+        final_output_path = codex_final_message_path(workspace_path) if backend == CODEX_BACKEND else None
+        args = task_command_args(backend, command, prompt, workspace_path, final_output_path)
+        if args is None:
+            return ""
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                args,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.settings.local_agent_timeout_seconds,
+                cwd=workspace_path,
+                stdin=subprocess.DEVNULL,
+                env=self._backend_env(backend),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        output = read_text_if_present(final_output_path) or result.stdout.strip() or result.stderr.strip()
+        if not output and backend_supports_api_fallback(backend):
+            output = await self._run_backend_api_fallback(backend, prompt, project)
+        return output
+
+    def _normalize_summary(self, summary: str, goal: str, tasks: list[DelegatedTask]) -> str:
+        clean = " ".join(str(summary or "").split()).strip(" -")
+        if not clean:
+            return fallback_summarize_goal(goal, tasks)
+        if len(clean) > 120:
+            clean = clean[:119].rstrip(" ,;:") + "..."
+        return clean
 
     async def _run_backend_events(
         self,
@@ -736,6 +894,9 @@ class LocalAgentCliClient(SwarmClient):
         if len(clean) <= limit:
             return clean
         return f"{clean[: limit - 1]}..."
+
+    def _trim_summary_line(self, line: str, limit: int = 180) -> str:
+        return self._trim_stream_line(line, limit)
 
     def _is_benign_stderr(self, line: str) -> bool:
         return is_benign_agent_stderr(line)

@@ -78,3 +78,22 @@ def test_chat_thread_can_be_renamed(tmp_path):
     assert renamed is not None
     assert renamed.title == "GitHub-like site"
     assert chat_thread_state(state_path)["active_title"] == "GitHub-like site"
+
+
+def test_chat_titles_clean_chatty_prefixes_and_old_punctuation(tmp_path):
+    state_path = tmp_path / "ui_state.json"
+
+    append_chat("user", "You", "ok; i wanna create a simple website that resembles GitHub", state_path)
+    state = chat_thread_state(state_path)
+
+    assert state["active_title"] == "create a simple website that resembles GitHub"
+
+
+def test_duplicate_tail_chat_records_are_collapsed(tmp_path):
+    state_path = tmp_path / "ui_state.json"
+
+    append_chat("user", "You", "same message", state_path)
+    append_chat("user", "You", "same message", state_path)
+
+    records = load_chat_history(path=state_path)
+    assert [record.content for record in records] == ["same message"]

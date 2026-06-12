@@ -46,6 +46,7 @@ class CoordinationManager:
         backend: str = "file",
         http_url: str = "",
         http_urls: str = "",
+        task_lease_seconds: int = 120,
     ) -> None:
         self.state_path = state_path.resolve()
         self.backend = backend.lower().strip() or "file"
@@ -59,6 +60,7 @@ class CoordinationManager:
         self.agent_roles = agent_roles
         self.agent_backends = agent_backends or [SIMULATED_BACKEND]
         self.orchestrator_ttl = timedelta(seconds=orchestrator_ttl_seconds)
+        self.task_lease = timedelta(seconds=max(10, task_lease_seconds))
         if self.backend == "file":
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
         elif self.backend == "http" and not self.http_urls:
@@ -191,6 +193,7 @@ class CoordinationManager:
         with self._state_lock():
             state = self._load()
             now = datetime.now(UTC)
+            self._recover_expired_tasks(state, now)
             for item in state["tasks"]:
                 if item["assigned_machine"] != self.machine_id:
                     continue
@@ -199,10 +202,31 @@ class CoordinationManager:
                 if item.get("preferred_backend") not in self.agent_backends:
                     continue
                 item["status"] = "running"
+                item["claimed_by"] = self.machine_id
+                item["lease_expires_at"] = (now + self.task_lease).isoformat()
                 item["updated_at"] = now.isoformat()
                 self._save(state)
                 return self._task_from_json(item)
             return None
+
+    def renew_task_lease(self, task_id: str) -> bool:
+        with self._state_lock():
+            state = self._load()
+            now = datetime.now(UTC)
+            for item in state["tasks"]:
+                if item["task_id"] != task_id:
+                    continue
+                if item.get("status") != "running":
+                    return False
+                claimed_by = str(item.get("claimed_by", "")).strip()
+                if claimed_by and claimed_by != self.machine_id:
+                    return False
+                item["claimed_by"] = self.machine_id
+                item["lease_expires_at"] = (now + self.task_lease).isoformat()
+                item["updated_at"] = now.isoformat()
+                self._save(state)
+                return True
+            return False
 
     def complete_task(self, task_id: str, result: str, status: str = "completed") -> None:
         with self._state_lock():
@@ -212,9 +236,57 @@ class CoordinationManager:
                 if item["task_id"] == task_id:
                     item["status"] = status
                     item["result"] = result
+                    item["claimed_by"] = ""
+                    item["lease_expires_at"] = None
                     item["updated_at"] = now
                     break
             self._save(state)
+
+    def _recover_expired_tasks(self, state: dict, now: datetime) -> None:
+        online = self._online_machines(state, now)
+        online_ids = {node.machine_id for node in online}
+        changed = False
+        for item in state["tasks"]:
+            if item.get("status") != "running":
+                continue
+            if not self._task_lease_is_expired(item, now):
+                continue
+
+            assigned_machine = str(item.get("assigned_machine", "")).strip()
+            preferred_backend = str(item.get("preferred_backend", SIMULATED_BACKEND)).strip() or SIMULATED_BACKEND
+            target_machine = assigned_machine
+            if assigned_machine not in online_ids and online:
+                role = str(item.get("role", "engineer")).strip() or "engineer"
+                goal = str(item.get("goal", "")).strip()
+                backend_capable = [machine for machine in online if preferred_backend in machine.agent_backends]
+                candidates = backend_capable or online
+                target_machine = self._best_machine_for_role(candidates, role, goal).machine_id
+
+            item["status"] = "delegated"
+            item["assigned_machine"] = target_machine
+            item["claimed_by"] = ""
+            item["lease_expires_at"] = None
+            item["updated_at"] = now.isoformat()
+            changed = True
+
+        if changed:
+            self._save(state)
+
+    def _task_lease_is_expired(self, item: dict, now: datetime) -> bool:
+        lease_text = str(item.get("lease_expires_at", "")).strip()
+        if lease_text:
+            try:
+                return now >= datetime.fromisoformat(lease_text)
+            except ValueError:
+                return True
+        updated_text = str(item.get("updated_at", "")).strip()
+        if not updated_text:
+            return True
+        try:
+            updated_at = datetime.fromisoformat(updated_text)
+        except ValueError:
+            return True
+        return now - updated_at > self.task_lease
 
     def _roles_for_goal(self, goal: str) -> list[str]:
         return infer_goal_roles(goal)
@@ -626,6 +698,8 @@ class CoordinationManager:
             status=item["status"],
             created_at=datetime.fromisoformat(item["created_at"]),
             updated_at=datetime.fromisoformat(item["updated_at"]) if item.get("updated_at") else None,
+            claimed_by=item.get("claimed_by", ""),
+            lease_expires_at=datetime.fromisoformat(item["lease_expires_at"]) if item.get("lease_expires_at") else None,
             result=item.get("result", ""),
         )
 
@@ -633,6 +707,7 @@ class CoordinationManager:
         payload = asdict(task)
         payload["created_at"] = task.created_at.isoformat()
         payload["updated_at"] = task.updated_at.isoformat() if task.updated_at else None
+        payload["lease_expires_at"] = task.lease_expires_at.isoformat() if task.lease_expires_at else None
         return payload
 
     def _now_text(self) -> str:

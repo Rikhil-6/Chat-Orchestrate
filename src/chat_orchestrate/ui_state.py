@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -193,6 +194,13 @@ def append_chat(role: str, author: str, content: str, path: Path = UI_STATE_PATH
     payload = load_ui_state(path)
     thread = _ensure_active_thread(payload)
     records = thread.setdefault("messages", [])
+    clean_content = re_space(str(content or ""))
+    if _is_duplicate_tail_record(records, role, author, clean_content):
+        records[-1]["created_at"] = datetime.now(UTC).isoformat()
+        thread["updated_at"] = records[-1]["created_at"]
+        payload["chat"] = list(records)[-CHAT_HISTORY_LIMIT:]
+        save_ui_state(payload, path)
+        return
     record = asdict(
         ChatRecord(
             role=role,
@@ -304,6 +312,8 @@ def _normalize_thread(item: dict) -> dict:
     messages = item.get("messages", [])
     if isinstance(messages, list):
         thread["messages"] = [_normalize_record(record) for record in messages if isinstance(record, dict)][-CHAT_HISTORY_LIMIT:]
+    if _is_low_quality_title(str(thread.get("title", ""))) and thread["messages"]:
+        thread["title"] = _title_from_messages(thread["messages"]) or "New chat"
     return thread
 
 
@@ -386,6 +396,17 @@ def _thread_summary(thread: dict) -> ChatThreadSummary:
     )
 
 
+def _is_duplicate_tail_record(records: list[dict], role: str, author: str, content: str) -> bool:
+    if not records:
+        return False
+    previous = records[-1]
+    return (
+        str(previous.get("role", "")) == str(role)
+        and str(previous.get("author", "")) == str(author)
+        and re_space(str(previous.get("content", ""))) == content
+    )
+
+
 def _title_from_messages(messages: list[dict]) -> str:
     for item in messages:
         if str(item.get("role", "")) == "user" and item.get("content"):
@@ -398,7 +419,7 @@ def _title_from_messages(messages: list[dict]) -> str:
 
 def _title_from_content(content: str, limit: int = 52) -> str:
     text = re_space(" ".join(str(content).split()))
-    text = text.strip(" #`*_>")
+    text = _clean_title_prefixes(text.strip(" #`*_>"))
     if not text:
         return "New chat"
     if len(text) <= limit:
@@ -409,6 +430,26 @@ def _title_from_content(content: str, limit: int = 52) -> str:
 def _is_placeholder_title(title: str) -> bool:
     clean = title.strip().lower()
     return not clean or clean == "new chat" or clean.startswith("new chat ")
+
+
+def _is_low_quality_title(title: str) -> bool:
+    clean = title.strip()
+    return _is_placeholder_title(clean) or bool(re.match(r"^[;:,.>\-]+", clean))
+
+
+def _clean_title_prefixes(text: str) -> str:
+    clean = text.strip(" ;:,.>-")
+    leading_patterns = [
+        r"^(?:orite|alright|right-o|right|ok|okay|so|again|then|yo|hey|m8|mate|pls|please)\b[\s>:,;-]*",
+        r"^(?:task|plan|goal)\s+is\s+to\s+",
+        r"^(?:i\s+want(?:na)?|i\s+wanna|i\s+need|let'?s)\s+(?:to\s+)?",
+    ]
+    previous = None
+    while previous != clean:
+        previous = clean
+        for pattern in leading_patterns:
+            clean = re.sub(pattern, "", clean, flags=re.I).strip(" ;:,.>-")
+    return clean
 
 
 def _clean_project_name(name: str) -> str:

@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     machine_id: str = ""
     agent_backends: str = "auto"
     orchestrator_ttl_seconds: int = 120
+    task_lease_seconds: int = 120
     worker_poll_seconds: float = 5.0
     worker_dry_run: bool = True
     use_local_agent_chat: bool = True
