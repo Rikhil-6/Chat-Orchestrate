@@ -465,12 +465,29 @@ function ChatSwitcher({ chats }) {
 
 function ProjectSpaceCard({ workspace }) {
   const [draftName, setDraftName] = useState(workspace.name || "default");
+  const [sourceKind, setSourceKind] = useState(workspace.source_kind || "none");
+  const [visibility, setVisibility] = useState(workspace.visibility || "local-only");
+  const [gitRemote, setGitRemote] = useState(workspace.remote || "");
+  const [joinText, setJoinText] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [isProvisioning, setIsProvisioning] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const [copyState, setCopyState] = useState("");
   const [saveError, setSaveError] = useState("");
+  const [provisionError, setProvisionError] = useState("");
+  const [joinError, setJoinError] = useState("");
 
   useEffect(() => {
     setDraftName(workspace.name || "default");
+    setSourceKind(workspace.source_kind || "none");
+    setVisibility(workspace.visibility || "local-only");
+    setGitRemote(workspace.remote || "");
   }, [workspace.name]);
+
+  useEffect(() => {
+    setCopyState("");
+    setJoinError("");
+  }, [workspace.share_pack, workspace.remote, workspace.name]);
 
   const saveProject = async () => {
     const cleanName = draftName.trim();
@@ -481,11 +498,76 @@ function ProjectSpaceCard({ workspace }) {
     setIsSaving(true);
     setSaveError("");
     try {
-      await action("save_project_space", { project_name: cleanName, silent: true });
+      await action("save_project_profile", {
+        project_name: cleanName,
+        source_kind: sourceKind,
+        visibility,
+        git_remote: gitRemote.trim(),
+        silent: true,
+      });
     } catch (error) {
-      setSaveError("Project name was not saved. Try again.");
+      setSaveError("Project profile was not saved. Try again.");
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const provisionRepo = async () => {
+    const cleanName = draftName.trim();
+    if (!cleanName) {
+      setProvisionError("Add a project name first.");
+      return;
+    }
+    setIsProvisioning(true);
+    setProvisionError("");
+    try {
+      await action("provision_project_repo", {
+        project_name: cleanName,
+        source_kind: sourceKind,
+        visibility,
+        git_remote: gitRemote.trim(),
+        silent: true,
+      });
+    } catch (error) {
+      setProvisionError("Repo setup did not complete. Check local git or GitHub CLI state and try again.");
+    } finally {
+      setIsProvisioning(false);
+    }
+  };
+
+  const repoButtonLabel = gitRemote.trim()
+    ? "Attach remote"
+    : sourceKind === "github"
+      ? "Create GitHub repo"
+      : "Prepare shared repo";
+
+  const copySharePack = async () => {
+    if (!workspace.share_pack) return;
+    try {
+      await navigator.clipboard.writeText(workspace.share_pack);
+      setCopyState("Copied");
+      window.setTimeout(() => setCopyState(""), 1400);
+    } catch (error) {
+      setCopyState("Copy failed");
+      window.setTimeout(() => setCopyState(""), 1600);
+    }
+  };
+
+  const joinProject = async () => {
+    const cleanText = joinText.trim();
+    if (!cleanText) {
+      setJoinError("Paste the repo share pack or Git URL first.");
+      return;
+    }
+    setIsJoining(true);
+    setJoinError("");
+    try {
+      await action("join_project", { share_text: cleanText });
+      setJoinText("");
+    } catch (error) {
+      setJoinError("Could not join that shared repo yet.");
+    } finally {
+      setIsJoining(false);
     }
   };
 
@@ -499,7 +581,7 @@ function ProjectSpaceCard({ workspace }) {
           </p>
         </div>
         <Button size="sm" variant="outline" disabled={isSaving} onClick={saveProject}>
-          {isSaving ? "Saving" : "Save"}
+          {isSaving ? "Saving" : "Save profile"}
         </Button>
       </div>
       <div className="mt-3 grid gap-2">
@@ -512,9 +594,51 @@ function ProjectSpaceCard({ workspace }) {
             if (event.key === "Enter") saveProject();
           }}
         />
+        <div className="grid grid-cols-2 gap-2">
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">Source</span>
+            <select
+              className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+              value={sourceKind}
+              onChange={(event) => setSourceKind(event.target.value)}
+            >
+              <option value="none">local only</option>
+              <option value="github">github</option>
+              <option value="git">generic git</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-xs">
+            <span className="text-muted-foreground">Visibility</span>
+            <select
+              className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+              value={visibility}
+              onChange={(event) => setVisibility(event.target.value)}
+            >
+              <option value="local-only">local-only</option>
+              <option value="private">private</option>
+              <option value="public">public</option>
+            </select>
+          </label>
+        </div>
+        <input
+          className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+          value={gitRemote}
+          placeholder="https://github.com/owner/repo.git"
+          onChange={(event) => setGitRemote(event.target.value)}
+        />
         {saveError && <div className="text-[11px] text-destructive">{saveError}</div>}
+        <Button size="sm" variant="secondary" disabled={isProvisioning} onClick={provisionRepo}>
+          <GitBranch className="mr-2 h-3.5 w-3.5" /> {isProvisioning ? "Working" : repoButtonLabel}
+        </Button>
+        {provisionError && <div className="text-[11px] text-destructive">{provisionError}</div>}
       </div>
       <div className="mt-3 grid min-w-0 gap-2 text-xs">
+        {workspace.project_id && (
+          <div className="flex min-w-0 justify-between gap-3">
+            <span className="text-muted-foreground">Project ID</span>
+            <strong className="min-w-0 max-w-[62%] truncate text-right">{workspace.project_id}</strong>
+          </div>
+        )}
         <div className="flex min-w-0 justify-between gap-3">
           <span className="shrink-0 text-muted-foreground">Folder</span>
           <strong className="min-w-0 max-w-[62%] truncate text-right" title={workspace.path || ""}>
@@ -525,12 +649,67 @@ function ProjectSpaceCard({ workspace }) {
           <span className="text-muted-foreground">Mode</span>
           <strong className="min-w-0 truncate text-right">{workspace.mode || "local"}</strong>
         </div>
+        <div className="flex min-w-0 justify-between gap-3">
+          <span className="text-muted-foreground">Source</span>
+          <strong className="min-w-0 truncate text-right">{workspace.source_kind || "none"}</strong>
+        </div>
+        <div className="flex min-w-0 justify-between gap-3">
+          <span className="text-muted-foreground">Visibility</span>
+          <strong className="min-w-0 truncate text-right">{workspace.visibility || "local-only"}</strong>
+        </div>
         {workspace.branch && (
           <div className="flex min-w-0 justify-between gap-3">
             <span className="text-muted-foreground">Branch</span>
             <strong className="min-w-0 max-w-[62%] truncate text-right">{workspace.branch}</strong>
           </div>
         )}
+        {workspace.remote && (
+          <div className="flex min-w-0 justify-between gap-3">
+            <span className="text-muted-foreground">Remote</span>
+            <strong className="min-w-0 max-w-[62%] truncate text-right" title={workspace.remote}>
+              {workspace.remote}
+            </strong>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 grid gap-2 rounded-md border border-dashed bg-background/40 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs font-semibold">Shared repo</div>
+          {workspace.share_ready ? (
+            <Badge variant="secondary">ready</Badge>
+          ) : (
+            <Badge variant="outline">local only</Badge>
+          )}
+        </div>
+        <p className="text-[11px] leading-5 text-muted-foreground">
+          {workspace.share_hint || "Back this project with a Git remote to share it across machines."}
+        </p>
+        {workspace.share_pack ? (
+          <>
+            <textarea
+              readOnly
+              className="min-h-24 min-w-0 rounded-md border border-input bg-background px-3 py-2 text-[11px] outline-none"
+              value={workspace.share_pack}
+            />
+            <Button size="sm" variant="outline" onClick={copySharePack}>
+              <Handshake className="mr-2 h-3.5 w-3.5" /> {copyState || "Copy share pack"}
+            </Button>
+          </>
+        ) : null}
+        <label className="grid gap-1 text-xs">
+          <span className="text-muted-foreground">Join shared repo</span>
+          <textarea
+            className="min-h-20 min-w-0 rounded-md border border-input bg-background px-3 py-2 text-[11px] outline-none ring-offset-background focus:ring-2 focus:ring-ring"
+            value={joinText}
+            placeholder="Paste a project share pack or Git URL from another machine"
+            onChange={(event) => setJoinText(event.target.value)}
+          />
+        </label>
+        {joinError && <div className="text-[11px] text-destructive">{joinError}</div>}
+        <Button size="sm" variant="outline" disabled={isJoining} onClick={joinProject}>
+          <GitBranch className="mr-2 h-3.5 w-3.5" /> {isJoining ? "Joining" : "Join repo"}
+        </Button>
       </div>
     </div>
   );

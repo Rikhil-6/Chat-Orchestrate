@@ -16,6 +16,9 @@ class ProjectSpace:
     name: str
     path: Path
     mode: str = "local"
+    project_id: str = ""
+    source_kind: str = "none"
+    visibility: str = "local-only"
     git_remote: str | None = None
     branch: str | None = None
     source: str | None = None

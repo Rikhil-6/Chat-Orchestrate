@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import functools
 import logging
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -51,7 +53,13 @@ from chat_orchestrate.config import get_settings
 from chat_orchestrate.coordination import CoordinationError, CoordinationManager
 from chat_orchestrate.models import AgentSpec, DelegatedTask, MachineNode, OrchestrationRun, ProgressUpdate, ProjectSpace
 from chat_orchestrate.orchestrator import Orchestrator
-from chat_orchestrate.project_space import ProjectSpaceError, ProjectSpaceManager
+from chat_orchestrate.project_space import (
+    ProjectSpaceError,
+    ProjectSpaceManager,
+    parse_project_share_pack,
+    project_name_from_remote,
+    project_share_pack,
+)
 from chat_orchestrate.runtime_config import RUNTIME_CONFIG_PATH, clear_runtime_env, save_runtime_env
 from chat_orchestrate.summaries import summarize_goal
 from chat_orchestrate.swarm_client import build_swarm_client, is_benign_agent_stderr, workspace_write_contract
@@ -1329,6 +1337,18 @@ async def handle_command(text: str) -> None:
             cl.user_session.set("project_space", project)
             save_preferences({"project_name": project.name})
             await cl.Message(content=f"Created and selected `{project.name}` at `{project.path}`.").send()
+        elif command == "/bind-repo" and len(parts) >= 3:
+            name = parts[1]
+            repo_path = " ".join(parts[2:])
+            project = spaces.bind_repository(name, repo_path)
+            cl.user_session.set("project_space", project)
+            save_preferences({"project_name": project.name})
+            await cl.Message(
+                content=(
+                    f"Bound `{project.name}` to the existing repo at `{project.path}`.\n\n"
+                    f"{project_repo_sync_summary(project)}"
+                )
+            ).send()
         elif command == "/worktree" and len(parts) >= 4:
             name, repo_path, branch = parts[1], parts[2], parts[3]
             project = spaces.create_worktree(name, repo_path, branch)
@@ -1342,6 +1362,10 @@ async def handle_command(text: str) -> None:
             cl.user_session.set("project_space", project)
             save_preferences({"project_name": project.name})
             await cl.Message(content=f"Cloned and selected `{project.name}` at `{project.path}`.").send()
+        elif command == "/share-project":
+            await share_project()
+        elif command == "/join-project":
+            await join_project()
         elif command == "/workspace-modes":
             await show_workspace_modes()
         elif command == "/artifacts":
@@ -1403,8 +1427,90 @@ async def show_spaces() -> None:
     await cl.Message(content="## Project Spaces\n\n" + "\n".join(lines)).send()
 
 
+async def share_project() -> None:
+    project = cl.user_session.get("project_space")
+    if project is None:
+        await cl.Message(content="Pick or create a project space first.").send()
+        return
+    if not project.git_remote:
+        await cl.Message(
+            content=(
+                "## Shared Repo Not Ready Yet\n\n"
+                f"`{project.name}` is local-only right now, so another machine cannot auto-join it yet.\n\n"
+                "Use one of these first:\n\n"
+                f"- `/clone {project.name} <git-url> [branch]`\n"
+                f"- `/bind-repo {project.name} <local-repo-path>`\n\n"
+                "Once the project is backed by a Git remote, this panel will surface a copyable share pack."
+            )
+        ).send()
+        return
+    await cl.Message(
+        content=(
+            "## Project Share Pack\n\n"
+            "Paste this into **Join shared repo** on another machine:\n\n"
+            "```text\n"
+            f"{project_share_pack(project)}\n"
+            "```\n\n"
+            f"{project_repo_sync_summary(project)}"
+        )
+    ).send()
+    await show_dashboard_sidebar()
+
+
+async def join_project(share_text: str | None = None) -> None:
+    if share_text is None:
+        share_text = await ask_text(
+            "Paste a project share pack or just a Git remote URL.",
+            "",
+        )
+    if share_text is None:
+        return
+
+    details = parse_project_share_pack(share_text)
+    git_remote = details.get("git_remote", "").strip()
+    branch = details.get("branch", "").strip() or None
+    project_name = slugify_project_name(
+        details.get("project_name", "").strip() or project_name_from_remote(git_remote or "shared-project")
+    )
+    if not git_remote:
+        await cl.Message(
+            content=(
+                "I could not find a Git remote in that share pack. Paste the pack from the host machine, "
+                "or paste a repository URL directly."
+            )
+        ).send()
+        return
+
+    project = spaces.attach_or_clone_repository(project_name, git_remote, branch)
+    cl.user_session.set("project_space", project)
+    save_preferences({"project_name": project.name})
+    chat_state = chat_thread_state()
+    active_id = str(chat_state.get("active_id", ""))
+    if active_id:
+        set_chat_thread_project(active_id, project.name)
+    await cl.Message(
+        content=(
+            "## Shared Repo Joined\n\n"
+            f"Active project: `{project.name}`  \n"
+            f"Local path: `{project.path}`\n\n"
+            f"{project_repo_sync_summary(project)}"
+        )
+    ).send()
+    await show_dashboard_sidebar()
+
+
 def activate_project_space(project_name: str, bind_to_active_chat: bool = True) -> ProjectSpace:
     project = ensure_project_space(project_name)
+    project = spaces.upsert(
+        project.name,
+        project.path,
+        git_remote=project.git_remote,
+        mode=project.mode,
+        source=project.source,
+        project_id=project.project_id,
+        source_kind=project.source_kind,
+        visibility=project.visibility,
+    )
     cl.user_session.set("project_space", project)
     save_preferences({"project_name": project.name})
     if bind_to_active_chat:
@@ -1419,6 +1525,116 @@ def reset_chat_task_context() -> None:
     cl.user_session.set("last_goal", "")
     cl.user_session.set("last_run", None)
     refresh_advertised_backends(selected_chat_backend(), "")
+
+
+def project_repo_sync_summary(project: ProjectSpace | None) -> str:
+    if project is None:
+        return "Choose a project space before wiring up shared repo sync."
+    if project.git_remote:
+        branch = project.branch or "default branch"
+        return (
+            f"Canonical repo: `{project.git_remote}` on `{branch}` with `{project.visibility}` visibility. "
+            "Other machines can clone or join this same repo, work on their assigned slices, then push branches or commits back for merge."
+        )
+    if project.mode in {"repo", "worktree"}:
+        return (
+            "This project is inside a local Git checkout but does not advertise an origin remote yet. "
+            "Add an origin remote, or clone from GitHub, so other machines can join it automatically."
+        )
+    return (
+        "This project space is local-only. For cross-machine code sync, back it with GitHub or another shared Git remote."
+    )
+
+
+def project_share_ready(project: ProjectSpace | None) -> bool:
+    return bool(project and project.git_remote)
+
+
+def project_share_hint(project: ProjectSpace | None, online_count: int = 1) -> str:
+    if project_share_ready(project):
+        return (
+            f"Copy this pack on the host machine, then paste it into Join shared repo on the other machine. "
+            f"Source: `{project.source_kind}`. Visibility: `{project.visibility}`."
+        )
+    if project is None:
+        return "Create or pick a project space first."
+    if online_count > 1:
+        return (
+            "More than one machine is online, but this project is still local-only. "
+            "Attach a GitHub or Git remote now so code can converge cleanly across machines."
+        )
+    return (
+        "To sync code across separate machines with minimal setup, clone a GitHub repo here or bind an existing local checkout first."
+    )
+
+
+def source_kind_from_remote(remote_url: str, fallback: str = "git") -> str:
+    normalized = (remote_url or "").strip().lower()
+    if "github.com" in normalized:
+        return "github"
+    return normalize_project_source_kind(fallback or "git")
+
+
+def github_cli_path() -> str | None:
+    return shutil.which("gh")
+
+
+@functools.lru_cache(maxsize=1)
+def github_authenticated_user() -> str:
+    gh = github_cli_path()
+    if not gh:
+        return ""
+    try:
+        result = subprocess.run(
+            [gh, "api", "user", "-q", ".login"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip()
+
+
+def create_github_repo_for_project(
+    project_name: str,
+    project_path: Path,
+    owner: str,
+    visibility: str,
+) -> str:
+    gh = github_cli_path()
+    if not gh:
+        raise ProjectSpaceError("GitHub CLI (`gh`) is not available on this machine.")
+
+    repo_slug = slugify_project_name(project_name)
+    full_name = f"{owner}/{repo_slug}"
+    visibility_flag = "--public" if visibility == "public" else "--private"
+    spaces.ensure_git_repository(project_path)
+
+    view_result = subprocess.run(
+        [gh, "repo", "view", full_name, "--json", "nameWithOwner"],
+        capture_output=True,
+        text=True,
+        timeout=12,
+    )
+    if view_result.returncode != 0:
+        try:
+            subprocess.run(
+                [gh, "repo", "create", full_name, visibility_flag, "--source", str(project_path), "--remote", "origin"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+        except OSError as exc:
+            raise ProjectSpaceError(f"Could not start GitHub CLI: {exc}") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            details = stderr or stdout or "GitHub CLI returned an error while creating the repository."
+            raise ProjectSpaceError(details) from exc
+    return f"https://github.com/{full_name}.git"
 
 
 def unique_new_chat_project_name() -> str:
@@ -1467,6 +1683,137 @@ async def save_project_space_from_action(project_name: str, silent: bool = False
                 "## Project Space Saved\n\n"
                 f"Active project: `{project.name}`\n\n"
                 f"Writable folder: `{project.path}`"
+            )
+        ).send()
+    await show_dashboard_sidebar()
+
+
+async def save_project_profile_from_action(
+    project_name: str,
+    source_kind: str,
+    visibility: str,
+    git_remote: str,
+    silent: bool = False,
+) -> None:
+    current = cl.user_session.get("project_space")
+    if current is None:
+        current = initial_project_space()
+    clean_name = slugify_project_name(project_name or current.name)
+    clean_source_kind = normalize_project_source_kind(source_kind)
+    clean_visibility = normalize_project_visibility(visibility)
+    clean_remote = git_remote.strip()
+    if clean_source_kind in {"github", "git"} and not clean_remote:
+        clean_source_kind = "none"
+        if clean_visibility != "public":
+            clean_visibility = "local-only"
+    project = spaces.update_profile(
+        current.name,
+        project_name=clean_name,
+        source_kind=clean_source_kind,
+        visibility=clean_visibility,
+        git_remote=clean_remote or None,
+    )
+    cl.user_session.set("project_space", project)
+    save_preferences({"project_name": project.name})
+    chat_state = chat_thread_state()
+    active_id = str(chat_state.get("active_id", ""))
+    if active_id:
+        set_chat_thread_project(active_id, project.name)
+    if not silent:
+        await cl.Message(
+            content=(
+                "## Project Profile Saved\n\n"
+                f"Project: `{project.name}`  \n"
+                f"Project ID: `{project.project_id}`  \n"
+                f"Source: `{project.source_kind}`  \n"
+                f"Visibility: `{project.visibility}`  \n"
+                f"Remote: `{project.git_remote or 'not set'}`"
+            )
+        ).send()
+    await show_dashboard_sidebar()
+
+
+async def provision_project_repo_from_action(
+    project_name: str,
+    source_kind: str,
+    visibility: str,
+    git_remote: str,
+    silent: bool = False,
+) -> None:
+    current = cl.user_session.get("project_space")
+    if current is None:
+        current = initial_project_space()
+
+    clean_name = slugify_project_name(project_name or current.name)
+    clean_source_kind = normalize_project_source_kind(source_kind)
+    clean_visibility = normalize_project_visibility(visibility)
+    clean_remote = git_remote.strip()
+
+    project = activate_project_space(clean_name)
+
+    if clean_remote:
+        spaces.configure_remote(project.path, clean_remote)
+        final_source_kind = source_kind_from_remote(clean_remote, clean_source_kind)
+        final_visibility = clean_visibility if clean_visibility != "local-only" else "private"
+        project = spaces.update_profile(
+            project.name,
+            source_kind=final_source_kind,
+            visibility=final_visibility,
+            git_remote=clean_remote,
+        )
+        cl.user_session.set("project_space", project)
+        if not silent:
+            await cl.Message(
+                content=(
+                    "## Remote Attached\n\n"
+                    f"Project: `{project.name}`  \n"
+                    f"Remote: `{project.git_remote}`  \n"
+                    f"Source: `{project.source_kind}`  \n"
+                    f"Visibility: `{project.visibility}`"
+                )
+            ).send()
+        await show_dashboard_sidebar()
+        return
+
+    if clean_source_kind != "github":
+        await cl.Message(
+            content=(
+                "To publish online from the UI, either paste an existing Git remote URL or choose `github` as the source."
+            )
+        ).send()
+        await show_dashboard_sidebar()
+        return
+
+    owner = github_authenticated_user()
+    if not owner:
+        await cl.Message(
+            content=(
+                "GitHub repo creation needs the local GitHub CLI (`gh`) signed in on this machine.\n\n"
+                "Run `gh auth login`, then retry **Create GitHub repo** from the project card."
+            )
+        ).send()
+        await show_dashboard_sidebar()
+        return
+
+    final_visibility = clean_visibility if clean_visibility in {"private", "public"} else "private"
+    remote_url = create_github_repo_for_project(project.name, project.path, owner, final_visibility)
+    spaces.configure_remote(project.path, remote_url)
+    project = spaces.update_profile(
+        project.name,
+        source_kind="github",
+        visibility=final_visibility,
+        git_remote=remote_url,
+    )
+    cl.user_session.set("project_space", project)
+    if not silent:
+        await cl.Message(
+            content=(
+                "## GitHub Repo Ready\n\n"
+                f"Project: `{project.name}`  \n"
+                f"Owner: `{owner}`  \n"
+                f"Remote: `{project.git_remote}`  \n"
+                f"Visibility: `{project.visibility}`\n\n"
+                "Other machines can now use the shared repo pack from the dashboard to join this same project."
             )
         ).send()
     await show_dashboard_sidebar()
@@ -2414,9 +2761,14 @@ async def show_workspace_modes() -> None:
             "> ### Clone Mode\n"
             "> Use when agents should work on separate copies or competing versions of the same repo.  \n"
             "> Command: `/clone <name> <git-url> [branch]`\n\n"
+            "> ### Bind Existing Repo\n"
+            "> Use when the repo is already cloned on this machine and you just want this UI to adopt it.  \n"
+            "> Command: `/bind-repo <name> <repo-path>`\n\n"
             "> ### Local Folder Mode\n"
             "> Use when the project already exists as a local folder.  \n"
-            "> Command: `/create-space <name> <path>`"
+            "> Command: `/create-space <name> <path>`\n\n"
+            "> ### Share / Join Across Machines\n"
+            "> Once a project has a Git remote, use `/share-project` on one machine and `/join-project` on another."
         )
     ).send()
 
@@ -2472,6 +2824,42 @@ async def save_project_space_action(action: cl.Action) -> None:
     payload = action_payload(action)
     project_name = str(payload.get("project_name", "")).strip()
     await save_project_space_from_action(project_name, silent=bool(payload.get("silent")))
+
+
+@cl.action_callback("save_project_profile")
+async def save_project_profile_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    await save_project_profile_from_action(
+        str(payload.get("project_name", "")).strip(),
+        str(payload.get("source_kind", "")).strip(),
+        str(payload.get("visibility", "")).strip(),
+        str(payload.get("git_remote", "")).strip(),
+        silent=bool(payload.get("silent")),
+    )
+
+
+@cl.action_callback("provision_project_repo")
+async def provision_project_repo_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    await provision_project_repo_from_action(
+        str(payload.get("project_name", "")).strip(),
+        str(payload.get("source_kind", "")).strip(),
+        str(payload.get("visibility", "")).strip(),
+        str(payload.get("git_remote", "")).strip(),
+        silent=bool(payload.get("silent")),
+    )
+
+
+@cl.action_callback("share_project")
+async def share_project_action(_: cl.Action) -> None:
+    await share_project()
+
+
+@cl.action_callback("join_project")
+async def join_project_action(action: cl.Action) -> None:
+    payload = action_payload(action)
+    share_text = str(payload.get("share_text", "")).strip() or None
+    await join_project(share_text)
 
 
 @cl.action_callback("claim_orchestrator")
@@ -2777,6 +3165,15 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
     can_host = not connected_to_http or hosting_live
     host_port = hosted_connection.get("port") or str(settings.coordinator_port if hosting_live else "")
     coordinator_urls = local_coordinator_urls(int(host_port)) if hosting_live and host_port.isdigit() else []
+    share_pack = project_share_pack(project) if project_share_ready(project) else ""
+    canonical_repo = (
+        f"{project.git_remote} ({project.visibility})" if project and project.git_remote else "local-only workspace"
+    )
+    merge_flow = (
+        f"workers clone `{project.git_remote}` and return branches against `{project.branch or 'default branch'}`"
+        if project and project.git_remote
+        else "back this project with a shared Git remote before expecting cross-machine code sync"
+    )
     a2a_base_url = ""
     if hosting_live and coordinator_urls:
         a2a_base_url = coordinator_urls[0]
@@ -2806,10 +3203,16 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
         },
         "workspace": {
             "name": project.name if project else "default",
+            "project_id": project.project_id if project else "",
             "path": str(project.path) if project else str(settings.workspaces_root / "default"),
             "mode": project.mode if project else "local",
+            "source_kind": project.source_kind if project else "none",
+            "visibility": project.visibility if project else "local-only",
             "branch": project.branch if project else "",
             "remote": project.git_remote if project else "",
+            "share_ready": project_share_ready(project),
+            "share_pack": share_pack,
+            "share_hint": project_share_hint(project, online_count),
         },
         "policy": {
             "selected_backend": selected_backend,
@@ -2825,8 +3228,8 @@ def dashboard_props(machines: list[MachineNode], orchestrator_id: str) -> dict:
             "artifacts": [artifact.__dict__ for artifact in artifacts],
             "evaluation": build_evaluation(project, current_tasks),
             "worker_outputs": repo_worker_outputs(current_tasks),
-            "canonical": "waiting for workspace decision",
-            "merge": "waiting for worker outputs",
+            "canonical": canonical_repo,
+            "merge": merge_flow,
         },
         "run": dashboard_run_props(tasks_snapshot, current_run_id),
         "machines": [machine_dashboard_props(machine, tasks_snapshot, current_run_id) for machine in machines],
@@ -3172,8 +3575,11 @@ def command_help() -> str:
         "- `/project` or `/set-project`\n"
         "- `/use <name>`\n"
         "- `/create-space <name> <path>`\n"
+        "- `/bind-repo <name> <repo-path>`\n"
         "- `/worktree <name> <repo-path> <branch>`\n"
         "- `/clone <name> <git-url> [branch]`\n"
+        "- `/share-project`\n"
+        "- `/join-project`\n"
         "- `/workspace-modes`\n"
         "- `/artifacts`\n"
         "- `/layout`\n"
@@ -3318,6 +3724,20 @@ def slugify_project_name(project_name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", project_name.strip().lower())
     slug = re.sub(r"-+", "-", slug).strip("-")
     return slug or "project"
+
+
+def normalize_project_source_kind(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    if clean in {"github", "git", "none"}:
+        return clean
+    return "none"
+
+
+def normalize_project_visibility(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    if clean in {"public", "private", "local-only"}:
+        return clean
+    return "local-only"
 
 
 def hosted_state_path(cluster_id: str, port: int) -> Path:

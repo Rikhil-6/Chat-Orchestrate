@@ -91,6 +91,8 @@ Project spaces are kept under `WORKSPACES_ROOT` unless an absolute path is suppl
 
 The dashboard has a **Project Space** card with a **Set Project** button. Use it to choose a human project name before asking agents to write code; the app creates/selects a writable folder such as `./workspaces/mock-google-site` and saves that choice locally. The same flow is available from the **Project** action or `/project`.
 
+Each project space now also carries its own `project_profile.json` inside the workspace. That profile stores the stable project ID, sync mode, source kind (`none`, `github`, or `git`), visibility (`local-only`, `private`, or `public`), repo URL, and branch. The dashboard edits that profile directly so new chats/projects stay identifiable instead of depending on transient session state.
+
 In chat, use commands like:
 
 ```text
@@ -98,8 +100,11 @@ In chat, use commands like:
 /project
 /use my-app
 /create-space my-app C:\code\my-app
+/bind-repo my-app C:\code\my-app
 /worktree my-app C:\code\my-app feature/agent-pass
 /clone my-app https://github.com/org/repo.git feature/experiment
+/share-project
+/join-project
 /workspace-modes
 /detect-agents
 /restart-app
@@ -117,7 +122,15 @@ In chat, use commands like:
 
 After selecting a project space, normal messages are treated as orchestration goals.
 
-Use **worktree mode** when agents are working on the same project with separate branches. Use **clone mode** when agents should explore separate copies or competing versions of the same repository.
+Use **worktree mode** when agents are working on the same project with separate branches. Use **clone mode** when agents should explore separate copies or competing versions of the same repository. Use **bind existing repo** when the code is already cloned locally and you just want the harness to adopt that checkout as the active project space.
+
+For the lowest-friction cross-machine setup, back the active project with GitHub:
+
+1. On one machine, clone or bind the repo into the active project space.
+2. Open the **Project Space** card and copy the **Shared repo** pack.
+3. On the other machine, paste that pack into **Join shared repo**.
+
+That second machine will clone the same remote into its own local `workspaces/<project-name>` folder, point the chat at it, and keep repo convergence details visible in the dashboard.
 
 Distributed code still converges through one canonical project repo. In worktree mode, machines return branches such as `codex/backend-api` or `claude/frontend-ui`; in clone mode, they return patches, branches, PRs, or artifacts. Frontend machines should also return preview URLs or screenshots so backend-only machines can inspect the result before the coordinator merges everything into the selected project space.
 
