@@ -311,8 +311,11 @@ def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0
     ]
     if phase == "assigned":
         lines.append("")
-        lines.append("I picked this up from the coordinator and am starting the local agent now.")
-        lines.append("The coordinator expects this machine to own this workstream and report concrete output back.")
+        lines.append(
+            f"This machine now owns the `{task.role}` slice for `{task.project}` and should execute: "
+            f"{task.brief or task.title}"
+        )
+        lines.append("The local agent is starting now, and its output should come back through this chat.")
     elif phase == "running":
         lines.append("")
         lines.append(f"Status: {worker_running_note(task, tick, elapsed)}")
@@ -335,9 +338,9 @@ def worker_task_status_content(task, phase: str, elapsed: int = 0, tick: int = 0
 
 def worker_running_note(task, tick: int, elapsed: int) -> str:
     activities = [
-        f"Opening the `{task.project}` workspace for `{task.role}` work.",
-        f"Running `{task.preferred_backend}` on the assigned brief: {task.brief or task.title}",
-        "Preparing the handoff result, changed files, and verification notes for the coordinator.",
+        f"Opening `{task.project}` and checking the local files needed for `{task.role}`.",
+        f"Running `{task.preferred_backend}` on this machine for: {task.brief or task.title}",
+        f"Packaging changed files, preview steps, and notes for the `{task.role}` handoff.",
     ]
     return f"{activities[(max(1, tick) - 1) % len(activities)]} Elapsed `{elapsed}s`."
 
@@ -560,10 +563,21 @@ def looks_like_run_status_prompt(text: str) -> bool:
         "who's doing",
         "when the task has been assigned",
         "let me know when the task has been assigned",
+        "what tasks are to be done",
+        "what task is to be done",
+        "what needs to be done",
+        "what's left",
+        "whats left",
+        "to do here",
+        "todo here",
+        "what to do here",
+        "what should be done here",
     ]
     if any(marker in clean for marker in explicit):
         return True
-    if len(clean) <= 28 and any(term in clean for term in ["task", "assigned", "update", "progress"]):
+    if len(clean) <= 48 and any(
+        term in clean for term in ["task", "tasks", "todo", "to do", "assigned", "update", "progress", "left"]
+    ):
         return True
     return False
 
@@ -1047,11 +1061,51 @@ def progress_line(update: ProgressUpdate) -> str:
     if update.role:
         tags.append(f"`{update.role}`")
     prefix = f"- {' '.join(tags)} " if tags else "- "
-    return prefix + update.message
+    return prefix + humanize_progress_message(update)
+
+
+def humanize_progress_message(update: ProgressUpdate) -> str:
+    message = str(update.message or "").strip()
+    if update.phase not in {"agent-warning", "agent-error"}:
+        return message
+    if "stderr:" not in message.lower():
+        return message
+    issue = classify_agent_warning(message)
+    if issue:
+        return issue
+    return message
+
+
+def classify_agent_warning(message: str) -> str:
+    lowered = str(message or "").lower()
+    if "objectnotfound" in lowered or "commandnotfoundexception" in lowered or "`rg`" in lowered or "(rg" in lowered:
+        return "Local agent hit a missing shell tool while working. The task can continue, but this machine is missing part of the expected CLI toolchain."
+    if "apply_patch verification failed" in lowered:
+        return "Local agent tried to patch a file, but the file contents had drifted from what it expected. This task likely needs a fresh reread before retrying."
+    if "readonly database" in lowered or "state db" in lowered or "in-process app-server client" in lowered:
+        return "Local agent started, but its local runtime state was not writable from this process."
+    if "unauthorized" in lowered or "invalid admin api key" in lowered or "missing or invalid admin api key" in lowered:
+        return "The generated app hit an API authorization/runtime warning during verification."
+    if "export function notfound" in lowered or "export function unauthorized" in lowered or "title: " in lowered:
+        return "The generated app logged runtime warnings while the agent was checking its output."
+    return ""
 
 
 def should_hide_progress_update(update: ProgressUpdate) -> bool:
-    return update.phase == "agent-warning" and is_benign_agent_stderr(update.message)
+    if update.phase != "agent-warning":
+        return False
+    message = str(update.message or "")
+    if is_benign_agent_stderr(message):
+        return True
+    lowered = message.lower()
+    noisy_runtime_markers = [
+        "title: ",
+        "export function notfound",
+        "export function unauthorized",
+        "missing or invalid admin api key",
+        "invalid admin api key",
+    ]
+    return any(marker in lowered for marker in noisy_runtime_markers)
 
 
 async def run_status_call(
@@ -1090,7 +1144,8 @@ def progress_key(update: ProgressUpdate) -> str:
         machine = update.assigned_machine or "local"
         role = update.role or "agent"
         backend = update.preferred_backend or "backend"
-        fingerprint = abs(hash((update.phase, machine, role, backend, progress_message_fingerprint(update.message))))
+        fingerprint_source = humanize_progress_message(update)
+        fingerprint = abs(hash((update.phase, machine, role, backend, progress_message_fingerprint(fingerprint_source))))
         return f"stream:{machine}:{role}:{backend}:{fingerprint}"
     if update.task_id:
         return f"task:{update.task_id}"

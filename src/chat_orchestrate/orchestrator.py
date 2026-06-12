@@ -546,18 +546,18 @@ class Orchestrator:
         if self.coordination is not None and task.assigned_machine != self.coordination.machine_id:
             status = observed_task.status if observed_task else task.status
             if status == "running":
-                activity = "Remote worker has claimed the task and is running the local agent."
+                activity = "Remote worker has claimed the task and is actively working the assigned slice."
             elif status == "failed":
-                activity = "Remote worker reported a failure; capturing the error for recovery."
+                activity = "Remote worker reported a failure; capturing the error and deciding whether to recover it."
             elif status == "completed":
                 activity = "Remote worker finished; collecting the returned result."
             elif status == "delegated":
-                activity = "Task is delegated but has not been claimed yet; checking worker availability."
+                activity = "Task is assigned but not claimed yet; checking that the target machine is awake and ready."
             detail = ""
             if observed_task and observed_task.progress_note:
                 detail = f" Latest worker note: {observed_task.progress_note}"
             elif task.brief:
-                detail = f" Brief: {task.brief}"
+                detail = f" Assigned work: {task.brief}"
             message = (
                 f"{activity} Status `{status}` on `{task.assigned_machine}` for `{task.role}` "
                 f"via `{task.preferred_backend}`.{detail} Elapsed: {elapsed}s."
@@ -644,10 +644,14 @@ class Orchestrator:
             return f"`{completed.preferred_backend}` result from `{completed.assigned_machine}`\n\n{completed.result}"
         status = completed.status if completed else task.status
         note = completed.progress_note if completed and completed.progress_note else task.progress_note
-        detail = f"\n\nWorker note: {note}" if note else (f"\n\nBrief: {task.brief}" if task.brief else "")
+        detail = (
+            f"\n\nAssigned work: {task.brief or task.title}"
+            + (f"\n\nLatest worker note: {note}" if note else "")
+        )
         return (
-            f"`{agent.name}` is handed off to `{task.assigned_machine}` via `{task.preferred_backend}`. "
-            f"Current status is `{status}`; that machine will keep working and report back through the dashboard."
+            f"`{agent.name}` is assigned to `{task.assigned_machine}` via `{task.preferred_backend}`."
+            f" Current status: `{status}`. I am waiting for that machine to finish its `{task.role}` slice and send"
+            f" the result back."
             f"{detail}"
         )
 

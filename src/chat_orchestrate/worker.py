@@ -81,7 +81,7 @@ async def run_worker(settings: Settings | None = None) -> None:
         try:
             coordination.note_task_progress(
                 task.task_id,
-                f"Claimed by `{coordination.machine_id}`. Starting `{task.role}` work: {task.brief or task.title}",
+                f"Claimed by `{coordination.machine_id}`. This machine is starting `{task.role}` work: {task.brief or task.title}",
                 status="running",
             )
         except Exception:
@@ -163,9 +163,9 @@ async def _run_task_with_lease(task, coordination: CoordinationManager, settings
 
 def _worker_progress_note(task, tick: int) -> str:
     steps = [
-        f"Opening the `{task.project}` workspace for `{task.role}` work.",
-        f"Running `{task.preferred_backend}` on the assigned brief: {task.brief or task.title}",
-        "Collecting files changed, verification notes, and coordinator handoff details.",
+        f"Opening `{task.project}` and locating the files for `{task.role}`.",
+        f"Running `{task.preferred_backend}` on this machine for: {task.brief or task.title}",
+        f"Collecting changed files, verification notes, and a clean `{task.role}` handoff.",
     ]
     return steps[(max(1, tick) - 1) % len(steps)]
 

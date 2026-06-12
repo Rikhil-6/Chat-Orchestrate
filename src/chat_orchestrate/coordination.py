@@ -301,6 +301,16 @@ class CoordinationManager:
                 backend_capable = [machine for machine in online if preferred_backend in machine.agent_backends]
                 candidates = backend_capable or online
                 target_machine = self._best_machine_for_role(candidates, role, goal).machine_id
+            elif assigned_machine in online_ids and self._task_can_move_from_online_worker(item, now) and online:
+                role = str(item.get("role", "engineer")).strip() or "engineer"
+                goal = str(item.get("goal", "")).strip()
+                backend_capable = [machine for machine in online if preferred_backend in machine.agent_backends]
+                candidates = backend_capable or online
+                alternate_candidates = [
+                    machine for machine in candidates if machine.machine_id != assigned_machine
+                ]
+                target_pool = alternate_candidates or candidates
+                target_machine = self._best_machine_for_role(target_pool, role, goal).machine_id
 
             item["status"] = "delegated"
             item["original_machine"] = str(item.get("original_machine", "")).strip() or assigned_machine
@@ -309,9 +319,16 @@ class CoordinationManager:
             item["lease_expires_at"] = None
             item["recovery_count"] = int(item.get("recovery_count", 0) or 0) + 1
             item["last_recovered_from"] = assigned_machine
-            item["progress_note"] = (
-                f"Lease expired on `{assigned_machine or 'unknown'}`; task is queued again for `{target_machine}`."
-            )
+            if target_machine == assigned_machine:
+                item["progress_note"] = (
+                    f"Lease expired on `{assigned_machine or 'unknown'}`; task is queued again for "
+                    f"`{target_machine}`."
+                )
+            else:
+                item["progress_note"] = (
+                    f"Lease stayed quiet too long on `{assigned_machine or 'unknown'}`; task is reassigned to "
+                    f"`{target_machine}`."
+                )
             item["updated_at"] = now.isoformat()
             changed = True
 
@@ -333,6 +350,16 @@ class CoordinationManager:
         except ValueError:
             return True
         return now - updated_at > self.task_lease
+
+    def _task_can_move_from_online_worker(self, item: dict, now: datetime) -> bool:
+        updated_text = str(item.get("updated_at", "")).strip()
+        if not updated_text:
+            return True
+        try:
+            updated_at = datetime.fromisoformat(updated_text)
+        except ValueError:
+            return True
+        return now - updated_at > (self.task_lease * 2)
 
     def _roles_for_goal(self, goal: str) -> list[str]:
         return infer_goal_roles(goal)

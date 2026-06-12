@@ -441,6 +441,92 @@ def test_expired_task_reassigns_when_original_machine_is_offline(tmp_path: Path)
     assert reclaimed.recovery_count == 1
 
 
+def test_expired_task_stays_with_online_worker_until_stuck_threshold(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    host = CoordinationManager(
+        state,
+        "host-a",
+        ["coordinator", "backend"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    worker = CoordinationManager(
+        state,
+        "worker-b",
+        ["frontend"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    host.heartbeat()
+    worker.heartbeat()
+    host.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "build frontend on worker-b",
+        machine_preferences={"frontend": "worker-b"},
+        roles=["frontend"],
+    )
+
+    worker_task = worker.claim_next_task()
+    assert worker_task is not None
+
+    payload = json.loads(state.read_text(encoding="utf-8"))
+    payload["tasks"][0]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    payload["tasks"][0]["updated_at"] = (datetime.now(UTC) - timedelta(seconds=11)).isoformat()
+    state.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    reclaimed = worker.claim_next_task()
+    assert reclaimed is not None
+    assert reclaimed.task_id == worker_task.task_id
+    assert reclaimed.assigned_machine == "worker-b"
+    assert reclaimed.claimed_by == "worker-b"
+
+
+def test_expired_task_reassigns_when_online_worker_is_stuck_too_long(tmp_path: Path) -> None:
+    state = tmp_path / "coordination.json"
+    host = CoordinationManager(
+        state,
+        "host-a",
+        ["coordinator", "backend", "frontend"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    worker = CoordinationManager(
+        state,
+        "worker-b",
+        ["frontend"],
+        ["codex"],
+        task_lease_seconds=10,
+    )
+    host.heartbeat()
+    worker.heartbeat()
+    host.plan_delegation(
+        "run-1",
+        ProjectSpace(name="demo", path=tmp_path / "demo"),
+        "build frontend on worker-b",
+        machine_preferences={"frontend": "worker-b"},
+        roles=["frontend"],
+    )
+
+    worker_task = worker.claim_next_task()
+    assert worker_task is not None
+
+    payload = json.loads(state.read_text(encoding="utf-8"))
+    payload["tasks"][0]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    payload["tasks"][0]["updated_at"] = (datetime.now(UTC) - timedelta(seconds=25)).isoformat()
+    state.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    reclaimed = host.claim_next_task()
+    assert reclaimed is not None
+    assert reclaimed.task_id == worker_task.task_id
+    assert reclaimed.assigned_machine == "host-a"
+    assert reclaimed.status == "running"
+    assert reclaimed.original_machine == "worker-b"
+    assert reclaimed.last_recovered_from == "worker-b"
+    assert reclaimed.recovery_count == 1
+    assert "reassigned to `host-a`" in reclaimed.progress_note
+
+
 def test_task_progress_note_round_trip(tmp_path: Path) -> None:
     state = tmp_path / "coordination.json"
     manager = CoordinationManager(

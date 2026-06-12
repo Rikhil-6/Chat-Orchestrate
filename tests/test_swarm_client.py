@@ -43,6 +43,43 @@ def test_codex_state_db_warning_is_not_treated_as_benign() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_cli_agent_hides_noisy_runtime_stderr(monkeypatch) -> None:
+    script = (
+        "import sys;"
+        "sys.stderr.write('title: \"When a launch brings crowds and chaos\"\\n');"
+        "sys.stderr.write('export function notFound(message = \"Not found\") {}\\n');"
+        "sys.stderr.write('export function unauthorized(message = \"Missing or invalid admin API key\") {}\\n');"
+        "sys.stdout.write('useful output\\n');"
+        "sys.stdout.flush()"
+    )
+
+    monkeypatch.setattr(
+        swarm_client,
+        "task_command_args",
+        lambda backend_name, command, prompt, workspace, final_output=None: ["python", "-c", script],
+    )
+    client = LocalAgentCliClient(Settings(local_agent_timeout_seconds=10), preferred_backend=CODEX_BACKEND)
+    client._command_for_backend = lambda backend_name: "python"
+
+    events = [
+        event
+        async for event in client._run_backend_events(
+            CODEX_BACKEND,
+            "prompt",
+            ProjectSpace("demo", Path(".")),
+            AgentSpec("Backend", "backend builder", ""),
+        )
+    ]
+    progress = [event for event in events if isinstance(event, ProgressUpdate)]
+    final = next(event for event in reversed(events) if isinstance(event, str))
+
+    assert not any("title:" in event.message.lower() for event in progress)
+    assert not any("export function notfound" in event.message.lower() for event in progress)
+    assert not any("invalid admin api key" in event.message.lower() for event in progress)
+    assert "useful output" in final
+
+
 def test_dead_local_proxy_env_is_removed_for_agent_processes() -> None:
     env = sanitized_agent_environment(
         {

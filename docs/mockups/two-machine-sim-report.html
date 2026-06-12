@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chat Orchestrate - Two Machine Simulation</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #181818;
+      --panel: #242424;
+      --panel-2: #2c2c2c;
+      --line: #464646;
+      --text: #f5f5f5;
+      --muted: #b8b8b8;
+      --subtle: #8c8c8c;
+      --accent: #ff0f6d;
+      --green: #34d399;
+      --amber: #f4bf4f;
+      --blue: #60a5fa;
+      --chip: #393939;
+      --radius: 10px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      min-height: 100vh;
+    }
+
+    .rail {
+      border-right: 1px solid #2d2d2d;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      padding: 18px 0;
+      color: var(--muted);
+    }
+
+    .mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      border: 1px solid var(--line);
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    main {
+      padding: 28px 30px 34px;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 900px;
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #202020;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--green);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .stat,
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .stat {
+      padding: 14px 16px;
+      min-height: 96px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .value {
+      font-size: 21px;
+      font-weight: 760;
+      line-height: 1.1;
+    }
+
+    .sub {
+      color: var(--subtle);
+      font-size: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1.1fr 0.9fr;
+      gap: 14px;
+    }
+
+    .card {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 17px;
+    }
+
+    .section-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      margin: 0;
+    }
+
+    .machine {
+      border: 1px solid #3c3c3c;
+      border-radius: 9px;
+      background: #202020;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .machine-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .machine-name {
+      font-size: 15px;
+      font-weight: 740;
+      margin-bottom: 3px;
+    }
+
+    .machine-host {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 12px;
+      border: 1px solid transparent;
+      background: var(--chip);
+      white-space: nowrap;
+    }
+
+    .badge.orchestrator {
+      color: white;
+      background: rgba(255, 15, 109, 0.95);
+    }
+
+    .badge.worker {
+      color: white;
+      background: rgba(96, 165, 250, 0.18);
+      border-color: rgba(96, 165, 250, 0.24);
+    }
+
+    .badge.codex {
+      color: #bfdbfe;
+      background: rgba(96, 165, 250, 0.14);
+      border-color: rgba(96, 165, 250, 0.28);
+    }
+
+    .badge.pass {
+      color: #d1fae5;
+      background: rgba(52, 211, 153, 0.14);
+      border-color: rgba(52, 211, 153, 0.28);
+    }
+
+    .badge.warn {
+      color: #fde68a;
+      background: rgba(244, 191, 79, 0.14);
+      border-color: rgba(244, 191, 79, 0.28);
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .chip {
+      display: inline-flex;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--chip);
+      font-size: 11px;
+      color: var(--text);
+    }
+
+    .timeline {
+      display: grid;
+      gap: 10px;
+    }
+
+    .step {
+      border-left: 2px solid #3c3c3c;
+      padding-left: 12px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .step strong {
+      font-size: 13px;
+    }
+
+    .step p {
+      margin: 0;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .matrix {
+      display: grid;
+      gap: 9px;
+    }
+
+    .row {
+      border: 1px solid #3a3a3a;
+      border-radius: 8px;
+      background: #202020;
+      padding: 10px 11px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .row-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .row p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #1b1b1b;
+      border: 1px solid #3a3a3a;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 12px;
+    }
+
+    .footer {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 1180px) {
+      .summary,
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <div class="mark">CO</div>
+      <div>sim</div>
+    </aside>
+
+    <main>
+      <section class="hero">
+        <div>
+          <h1>Two-Machine Simulation</h1>
+          <p>
+            This is a visual replay of the latest internal harness checks: task assignment,
+            host and worker claims, reclaim behavior when a worker goes stale, and stderr noise filtering
+            for local agent output.
+          </p>
+        </div>
+        <div class="pill"><span class="dot"></span> Local sim passed with soft reclaim enabled</div>
+      </section>
+
+      <section class="summary">
+        <article class="stat">
+          <div class="label">Machines</div>
+          <div class="value">2 live nodes</div>
+          <div class="sub">Host + worker planned correctly</div>
+        </article>
+        <article class="stat">
+          <div class="label">Assignments</div>
+          <div class="value">3 roles</div>
+          <div class="sub">Coordinator, backend, frontend</div>
+        </article>
+        <article class="stat">
+          <div class="label">Noise Filter</div>
+          <div class="value">1 useful update</div>
+          <div class="sub">No title or API-key junk surfaced</div>
+        </article>
+        <article class="stat">
+          <div class="label">Recovery</div>
+          <div class="value">Works when stuck</div>
+          <div class="sub">Quiet online workers now reassign after a longer timeout</div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Live roster</h2>
+          <p class="section-note">The sim used the same routing rules as the harness: explicit machine preference first, then capability-based fallback.</p>
+
+          <div class="machine">
+            <div class="machine-head">
+              <div>
+                <div class="machine-name">sg-akc-dt330</div>
+                <div class="machine-host">SG-AKC-DT330</div>
+              </div>
+              <span class="badge orchestrator">orchestrator</span>
+            </div>
+            <div class="chips">
+              <span class="badge codex">codex</span>
+              <span class="chip">coordinator</span>
+              <span class="chip">backend</span>
+            </div>
+          </div>
+
+          <div class="machine">
+            <div class="machine-head">
+              <div>
+                <div class="machine-name">laptop-es9pcb92</div>
+                <div class="machine-host">LAPTOP-ES9PCB92</div>
+              </div>
+              <span class="badge worker">worker</span>
+            </div>
+            <div class="chips">
+              <span class="badge codex">codex</span>
+              <span class="chip">frontend</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>Assignment flow</h2>
+          <div class="timeline">
+            <div class="step">
+              <strong>Planned correctly</strong>
+              <p>
+                <code>coordinator -> sg-akc-dt330</code>,
+                <code>backend -> sg-akc-dt330</code>,
+                <code>frontend -> laptop-es9pcb92</code>
+              </p>
+            </div>
+            <div class="step">
+              <strong>Claims succeeded</strong>
+              <p>Host claimed coordinator and backend. Worker claimed frontend. No misrouting in the initial pass.</p>
+            </div>
+            <div class="step">
+              <strong>Quiet worker grace window</strong>
+              <p>If the frontend lease expires but the laptop is still online, the harness gives it a short grace window before moving the task.</p>
+            </div>
+            <div class="step">
+              <strong>Soft reclaim after silence</strong>
+              <p>When the laptop stays quiet long enough, the host reclaims frontend cleanly with <code>recovery_count = 1</code>.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>Observed outcomes</h2>
+          <div class="matrix">
+            <div class="row">
+              <div class="row-top">
+                <strong>Follow-up intent</strong>
+                <span class="badge pass">pass</span>
+              </div>
+              <p><code>sooooo todo</code>, <code>what's left</code>, and similar prompts now classify as status follow-ups.</p>
+            </div>
+            <div class="row">
+              <div class="row-top">
+                <strong>Stderr filtering</strong>
+                <span class="badge pass">pass</span>
+              </div>
+              <p>The sim emitted one useful update only. No <code>title:</code> spam and no invalid API-key export noise appeared.</p>
+            </div>
+            <div class="row">
+              <div class="row-top">
+                <strong>Cross-machine recovery</strong>
+                <span class="badge pass">pass</span>
+              </div>
+              <p>Recovery now has two stages: patience first, then soft reclaim if the worker stays online but stops progressing.</p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="footer">
+        Strongest signal from the sim: initial routing is solid, warning noise is much cleaner, and reclaim now works
+        both for stale workers and for online workers that stay quiet long enough to look stuck.
+      </section>
+    </main>
+  </div>
+</body>
+</html>

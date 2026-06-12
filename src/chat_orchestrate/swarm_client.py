@@ -70,6 +70,17 @@ SURFACED_STDERR_MARKERS = (
     "unauthorized",
 )
 
+HIDE_STDERR_MARKERS = (
+    "title: ",
+    "export function notfound",
+    "export function unauthorized",
+    "missing or invalid admin api key",
+    "invalid admin api key",
+    "objectnotfound: (rg",
+    "commandnotfoundexception",
+    "fullyqualifiederrorid : commandnotfoundexception",
+)
+
 
 def is_benign_agent_stderr(line: str) -> bool:
     clean = str(line or "")
@@ -903,6 +914,8 @@ class LocalAgentCliClient(SwarmClient):
 
     def _should_surface_stderr(self, line: str) -> bool:
         lowered = str(line or "").lower()
+        if any(marker in lowered for marker in HIDE_STDERR_MARKERS):
+            return False
         return any(marker in lowered for marker in SURFACED_STDERR_MARKERS)
 
     def _workspace_has_recent_artifacts(self, project: ProjectSpace, started_wall: float) -> bool:
